@@ -35,7 +35,8 @@ jobs:
         run: npm ci
 
       - name: Restore Turbo cache
-        uses: actions/cache@v4
+        id: turbo-cache
+        uses: actions/cache/restore@v4
         with:
           path: .turbo
           key: turbo-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
@@ -79,6 +80,13 @@ jobs:
         env:
           TURBO_CACHE_DIR: .turbo
         run: npx turbo run test --filter="@memberjunction*...[origin/${{ github.base_ref || 'next' }}]" --log-order=stream
+
+      - name: Save Turbo cache
+        if: always() && steps.turbo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .turbo
+          key: turbo-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
 
       - name: Upload coverage
         if: always()
