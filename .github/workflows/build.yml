@@ -39,5 +39,8 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
+      - name: Configure Turbo remote cache (GitHub Actions backend)
+        uses: dtinth/setup-github-actions-caching-for-turbo@v1
+
       - name: Build packages
         run: npm run build
