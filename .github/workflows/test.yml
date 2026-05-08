@@ -21,6 +21,20 @@ jobs:
           persist-credentials: false
           fetch-depth: 0
 
+      - name: Compute Turbo filter base (merge-base of HEAD vs target branch)
+        id: base
+        run: |
+          BASE_BRANCH="${{ github.base_ref || 'next' }}"
+          git fetch origin "$BASE_BRANCH"
+          MERGE_BASE=$(git merge-base "origin/$BASE_BRANCH" HEAD 2>/dev/null || true)
+          if [ -n "$MERGE_BASE" ]; then
+            echo "ref=$MERGE_BASE" >> "$GITHUB_OUTPUT"
+            echo "Using merge-base: $MERGE_BASE"
+          else
+            echo "ref=origin/$BASE_BRANCH" >> "$GITHUB_OUTPUT"
+            echo "::warning::merge-base not resolvable; falling back to origin/$BASE_BRANCH (filter may over-match)"
+          fi
+
       - name: Set up node
         uses: actions/setup-node@v6
         with:
@@ -30,6 +44,17 @@ jobs:
 
       - name: Install dependencies
         run: npm ci
+
+      - name: Restore Turbo cache
+        id: turbo-cache
+        uses: actions/cache/restore@v4
+        with:
+          path: .turbo
+          key: turbo-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
+          restore-keys: |
+            turbo-${{ runner.os }}-${{ github.ref_name }}-
+            turbo-${{ runner.os }}-${{ github.base_ref || 'next' }}-
+            turbo-${{ runner.os }}-
 
       - name: Create MJExplorer environment file
         run: |
@@ -57,11 +82,22 @@ jobs:
           ENVEOF
           sed -i 's/^          //' packages/MJExplorer/src/environments/environment.ts
 
-      - name: Build packages
-        run: npm run build
+      - name: Build affected packages
+        env:
+          TURBO_CACHE_DIR: .turbo
+        run: npx turbo run build --filter="@memberjunction*...[${{ steps.base.outputs.ref }}]" --log-order=stream
 
-      - name: Run unit tests
-        run: npm test
+      - name: Test affected packages
+        env:
+          TURBO_CACHE_DIR: .turbo
+        run: npx turbo run test --filter="@memberjunction*...[${{ steps.base.outputs.ref }}]" --log-order=stream
+
+      - name: Save Turbo cache
+        if: always() && steps.turbo-cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        with:
+          path: .turbo
+          key: turbo-${{ runner.os }}-${{ github.ref_name }}-${{ github.sha }}
 
       - name: Upload coverage
         if: always()
