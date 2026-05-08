@@ -21,8 +21,19 @@ jobs:
           persist-credentials: false
           fetch-depth: 1
 
-      - name: Fetch base ref for incremental Turbo filter
-        run: git fetch origin ${{ github.base_ref || 'next' }} --depth=1
+      - name: Compute Turbo filter base (merge-base of HEAD vs target branch)
+        id: base
+        run: |
+          BASE_BRANCH="${{ github.base_ref || 'next' }}"
+          git fetch origin "$BASE_BRANCH" --depth=100
+          MERGE_BASE=$(git merge-base "origin/$BASE_BRANCH" HEAD 2>/dev/null || true)
+          if [ -n "$MERGE_BASE" ]; then
+            echo "ref=$MERGE_BASE" >> "$GITHUB_OUTPUT"
+            echo "Using merge-base: $MERGE_BASE"
+          else
+            echo "ref=origin/$BASE_BRANCH" >> "$GITHUB_OUTPUT"
+            echo "::warning::merge-base not resolvable in shallow clone; falling back to origin/$BASE_BRANCH (filter may over-match)"
+          fi
 
       - name: Set up node
         uses: actions/setup-node@v6
@@ -74,12 +85,12 @@ jobs:
       - name: Build affected packages
         env:
           TURBO_CACHE_DIR: .turbo
-        run: npx turbo run build --filter="@memberjunction*...[origin/${{ github.base_ref || 'next' }}]" --log-order=stream
+        run: npx turbo run build --filter="@memberjunction*...[${{ steps.base.outputs.ref }}]" --log-order=stream
 
       - name: Test affected packages
         env:
           TURBO_CACHE_DIR: .turbo
-        run: npx turbo run test --filter="@memberjunction*...[origin/${{ github.base_ref || 'next' }}]" --log-order=stream
+        run: npx turbo run test --filter="@memberjunction*...[${{ steps.base.outputs.ref }}]" --log-order=stream
 
       - name: Save Turbo cache
         if: always() && steps.turbo-cache.outputs.cache-hit != 'true'
