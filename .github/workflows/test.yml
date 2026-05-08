@@ -22,7 +22,7 @@ jobs:
           fetch-depth: 1
 
       - name: Fetch base ref for incremental Turbo filter
-        run: git fetch origin ${{ github.base_ref }} --depth=1
+        run: git fetch origin ${{ github.base_ref || 'next' }} --depth=1
 
       - name: Set up node
         uses: actions/setup-node@v6
@@ -64,10 +64,10 @@ jobs:
           sed -i 's/^          //' packages/MJExplorer/src/environments/environment.ts
 
       - name: Build affected packages
-        run: npx turbo run build --filter="@memberjunction*...[origin/${{ github.base_ref }}]" --log-order=stream
+        run: npx turbo run build --filter="@memberjunction*...[origin/${{ github.base_ref || 'next' }}]" --log-order=stream
 
       - name: Test affected packages
-        run: npx turbo run test --filter="@memberjunction*...[origin/${{ github.base_ref }}]" --log-order=stream
+        run: npx turbo run test --filter="@memberjunction*...[origin/${{ github.base_ref || 'next' }}]" --log-order=stream
 
       - name: Upload coverage
         if: always()
