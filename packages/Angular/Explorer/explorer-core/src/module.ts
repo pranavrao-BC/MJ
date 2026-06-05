@@ -65,6 +65,8 @@ import { VoiceWidgetComponent } from '@memberjunction/ng-voice-widget';
 import { OAuthCallbackComponent } from './lib/oauth/oauth-callback.component';
 import { SearchModule } from '@memberjunction/ng-search';
 import { MJWordCloudComponent } from '@memberjunction/ng-word-cloud';
+import { PaginationComponent } from '@memberjunction/ng-pagination';
+import { ConversationFeedbackResource } from './lib/conversation-feedback';
 
 @NgModule({
   declarations: [
@@ -93,6 +95,7 @@ import { MJWordCloudComponent } from '@memberjunction/ng-word-cloud';
     NotificationsResource,
     VoiceDemoResource,
     DashboardPreferencesDialogComponent,
+    ConversationFeedbackResource,
   ],
   imports: [
     AppRoutingModule,
@@ -132,7 +135,8 @@ import { MJWordCloudComponent } from '@memberjunction/ng-word-cloud';
     MJDropdownComponent,
     MJWindowComponent,
     MJWindowTitlebarComponent,
-    VoiceWidgetComponent
+    VoiceWidgetComponent,
+    PaginationComponent
   ],
   exports: [
     ResourceContainerComponent,
@@ -149,7 +153,8 @@ import { MJWordCloudComponent } from '@memberjunction/ng-word-cloud';
     EditDashboardComponent,
     UserNotificationsComponent,
     ListDetailResource,
-    DashboardPreferencesDialogComponent 
+    DashboardPreferencesDialogComponent,
+    ConversationFeedbackResource
   ],
   providers: [
     { provide: RouteReuseStrategy, useClass: CustomReuseStrategy },

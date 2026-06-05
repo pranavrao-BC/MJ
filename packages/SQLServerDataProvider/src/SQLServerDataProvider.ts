@@ -47,7 +47,6 @@ import {
   FieldChange,
   SaveSQLResult,
   DeleteSQLResult,
-  QueryInfo,
   RunViewWithCacheCheckParams,
   RunViewsWithCacheCheckResponse,
   RunViewWithCacheCheckResult,
@@ -61,6 +60,7 @@ import { NodeFileSystemProvider } from './NodeFileSystemProvider';
 import { EntityAIActionParams } from '@memberjunction/aiengine';
 import { QueueManager } from '@memberjunction/queue';
 import { GenericDatabaseProvider, ExecuteSQLBatchOptions, SaveCoercedValue, SaveCallBinding, SaveSQLFragment } from '@memberjunction/generic-database-provider';
+import { MJQueryEntityExtended } from '@memberjunction/core-entities';
 
 import sql from 'mssql';
 import { BehaviorSubject, Observable, Subject, concatMap, from, tap, catchError, of } from 'rxjs';
@@ -73,6 +73,8 @@ import {
 } from './types.js';
 
 import { DuplicateRecordDetector } from '@memberjunction/ai-vector-dupe';
+import type { IColocatedVectorHost } from '@memberjunction/ai-vectordb';
+import type { DatabasePlatform } from '@memberjunction/sql-dialect';
 
 import { v4 as uuidv4 } from 'uuid';
 import { UUIDsEqual } from '@memberjunction/global';
@@ -229,8 +231,11 @@ async function executeSQLCore(
     Query: ${query}
     Parameters: ${parameters ? JSON.stringify(parameters) : 'None'}`;
 
-    // Throw error with detailed message - caller decides whether to log
-    throw new Error(errorMessage);
+    // Preserve the original error type (ConnectionError vs RequestError) so callers
+    // can structurally distinguish infrastructure failures from query-level errors.
+    // Attach the detailed message while keeping the error's class identity and code.
+    error.message = errorMessage;
+    throw error;
   }
 }
 
@@ -256,7 +261,7 @@ async function executeSQLCore(
  */
 export class SQLServerDataProvider
   extends GenericDatabaseProvider
-  implements IEntityDataProvider, IMetadataProvider, IRunReportProvider
+  implements IEntityDataProvider, IMetadataProvider, IRunReportProvider, IColocatedVectorHost
 {
   /**************************************************************************/
   // SQL Dialect Implementations (override abstract methods from DatabaseProviderBase)
@@ -513,7 +518,7 @@ export class SQLServerDataProvider
    * Executes a batched cache status check for multiple queries using their CacheValidationSQL.
    */
   protected async getBatchedQueryCacheStatus(
-    items: Array<{ index: number; item: RunQueryWithCacheCheckParams; queryInfo: QueryInfo }>,
+    items: Array<{ index: number; item: RunQueryWithCacheCheckParams; query: MJQueryEntityExtended }>,
     contextUser?: UserInfo
   ): Promise<Map<number, { success: boolean; maxUpdatedAt?: string; rowCount?: number; errorMessage?: string }>> {
     const results = new Map<number, { success: boolean; maxUpdatedAt?: string; rowCount?: number; errorMessage?: string }>();
@@ -524,9 +529,9 @@ export class SQLServerDataProvider
 
     // Build array of SQL statements for batch execution
     const sqlStatements: string[] = [];
-    for (const { queryInfo } of items) {
+    for (const { query } of items) {
       // CacheValidationSQL should return MaxUpdatedAt and RowCount
-      sqlStatements.push(queryInfo.CacheValidationSQL!);
+      sqlStatements.push(query.CacheValidationSQL!);
     }
 
     try {
@@ -1569,6 +1574,29 @@ export class SQLServerDataProvider
       // Error already logged by _internalExecuteSQL
       throw e; // force caller to handle
     }
+  }
+
+  // ─── Colocated vector host (IColocatedVectorHost) ────────────────
+  // Lets a colocated vector provider (e.g. SQLServerVectorDatabase, SQL Server 2025 native
+  // vectors) store and query vectors in THIS database, reusing this connection — instead of
+  // opening a separate pool to a remote vector store.
+
+  public get ColocatedDialect(): DatabasePlatform {
+    return 'sqlserver';
+  }
+
+  public get ColocatedSchema(): string {
+    return this.MJCoreSchemaName;
+  }
+
+  /**
+   * Execute a parameterized statement for a colocated vector provider against this connection.
+   * Positional params bind to `@p0..@pN` (handled by {@link ExecuteSQL}'s array path), so the
+   * colocated provider emits `@p0`-style placeholders. Returns the recordset rows.
+   */
+  public async RunColocatedSQL<T = Record<string, unknown>>(sqlText: string, params?: ReadonlyArray<unknown>): Promise<T[]> {
+    const rows = await this.ExecuteSQL(sqlText, params ? [...params] : null);
+    return (Array.isArray(rows) ? rows : []) as T[];
   }
 
   /**

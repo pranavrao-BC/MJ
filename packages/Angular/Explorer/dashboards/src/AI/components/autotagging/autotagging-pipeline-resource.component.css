@@ -1207,6 +1207,15 @@
 
 /* ══════ RESPONSIVE ══════ */
 
+/* <mj-left-nav> collapses to a full-width top bar at ≤700px; stack the root
+   layout vertically so the content pane sits below it instead of being
+   squeezed to zero width in the flex row. */
+@media (max-width: 700px) {
+    .at-dashboard {
+        flex-direction: column;
+    }
+}
+
 @media (max-width: 1100px) {
     .at-pipeline-layout {
         flex-direction: column;
@@ -1420,6 +1429,23 @@
     flex: 1;
     justify-content: center;
 }
+
+/* "Open advanced settings →" link below the Save/Cancel row in the slide-in.
+   Subtle by design — power users will notice; new users won't be distracted. */
+.at-form-advanced-link {
+    margin-top: 12px;
+    padding-top: 12px;
+    border-top: 1px dashed var(--mj-border-subtle);
+    font-size: 12px;
+    text-align: center;
+}
+.at-form-advanced-link a {
+    color: var(--mj-brand-primary);
+    text-decoration: none;
+    cursor: pointer;
+}
+.at-form-advanced-link a:hover { text-decoration: underline; }
+.at-form-advanced-link i { margin-right: 6px; }
 
 /* Also add empty state for Content Types (matching Sources) */
 .at-add-type-card {

@@ -4,7 +4,7 @@ dotenv.config({ quiet: true });
 
 import { expressMiddleware } from '@as-integrations/express5';
 import { mergeSchemas } from '@graphql-tools/schema';
-import { Metadata, DatabasePlatform, SetProvider, StartupManager as StartupManagerImport, BaseEntity, BaseEntityEvent, RunView } from '@memberjunction/core';
+import { Metadata, DatabasePlatform, SetProvider, StartupManager as StartupManagerImport, BaseEntity, BaseEntityEvent, RunView, DatabaseProviderBase } from '@memberjunction/core';
 import { resolveDbPlatformFromEnv } from '@memberjunction/generic-database-provider';
 import { MJGlobal, MJEventType, UUIDsEqual, ShutdownRegistry } from '@memberjunction/global';
 import { setupSQLServerClient, SQLServerDataProvider, SQLServerProviderConfigData, UserCache } from '@memberjunction/sqlserver-dataprovider';
@@ -26,8 +26,12 @@ import sql from 'mssql';
 import { WebSocketServer } from 'ws';
 import buildApolloServer from './apolloServer/index.js';
 import { configInfo, dbDatabase, dbHost, dbPort, dbUsername, graphqlPort, graphqlRootPath, mj_core_schema, websiteRunFromPackage, RESTApiOptions } from './config.js';
+import { default as jwt } from 'jsonwebtoken';
 import { contextFunction, createUnifiedAuthMiddleware, getUserPayload } from './context.js';
+import { UserPayload } from './types.js';
 import { requireSystemUserDirective, publicDirective } from './directives/index.js';
+import { variablesLoggingMiddleware } from './logging/variablesLoggingMiddleware.js';
+import { auditResolversForUndecoratedArgs } from './logging/bootAudit.js';
 import createMSSQLConfig from './orm.js';
 import { setupRESTEndpoints } from './rest/setupRESTEndpoints.js';
 import { createOAuthCallbackHandler } from './rest/OAuthCallbackHandler.js';
@@ -43,7 +47,9 @@ import { GetAPIKeyEngine } from '@memberjunction/api-keys';
 import { RedisLocalStorageProvider } from '@memberjunction/redis-provider';
 import { GenericDatabaseProvider } from '@memberjunction/generic-database-provider';
 import { PubSubManager } from './generic/PubSubManager.js';
-import { ClientToolRequestManager } from '@memberjunction/ai-agents';
+import { IntegrationProgressEmitter } from '@memberjunction/integration-progress-artifacts';
+import { PublishIntegrationProgress } from './resolvers/IntegrationProgressResolver.js';
+import { ClientToolRequestManager, AgentRunWatchdog } from '@memberjunction/ai-agents';
 import { CACHE_INVALIDATION_TOPIC } from './generic/CacheInvalidationResolver.js';
 import { ConnectorFactory, IntegrationEngine, IntegrationSyncOptions } from '@memberjunction/integration-engine';
 import { CronExpressionHelper } from '@memberjunction/scheduling-engine';
@@ -81,6 +87,7 @@ export { configInfo, DEFAULT_SERVER_CONFIG } from './config.js';
 export { ServerExtensionLoader, BaseServerExtension } from '@memberjunction/server-extensions-core';
 export type { ServerExtensionConfig, ExtensionInitResult, ExtensionHealthResult } from '@memberjunction/server-extensions-core';
 export * from './directives/index.js';
+export { NoLog, hasNoLogParameter, getNoLogFields } from './logging/NoLog.js';
 export * from './entitySubclasses/MJEntityPermissionEntityServer.server.js';
 export * from './types.js';
 export {
@@ -105,6 +112,7 @@ export * from './resolvers/SearchKnowledgeStreamResolver.js';
 export * from './resolvers/AvailableSearchProvidersResolver.js';
 export * from './resolvers/FetchEntityVectorsResolver.js';
 export * from './resolvers/PipelineProgressResolver.js';
+export * from './resolvers/IntegrationProgressResolver.js';
 export * from './resolvers/ClientToolRequestResolver.js';
 export * from './resolvers/ChannelSessionResolver.js';
 export * from './resolvers/AutotagPipelineResolver.js';
@@ -149,6 +157,7 @@ export * from './resolvers/FileResolver.js';
 export * from './resolvers/InfoResolver.js';
 export * from './resolvers/PotentialDuplicateRecordResolver.js';
 export * from './resolvers/RunTestResolver.js';
+export * from './resolvers/SearchEntitiesResolver.js';
 export * from './resolvers/UserFavoriteResolver.js';
 export * from './resolvers/UserResolver.js';
 export * from './resolvers/UserViewResolver.js';
@@ -293,6 +302,86 @@ export const serve = async (resolverPaths: Array<string>, app: Application = cre
       return origExecuteSQLWithPool.call(this, pool, query, parameters, contextUser);
     };
 
+    // Set up CodeGen-credentialed provider + in-process CodeGen runner for RSU (PostgreSQL).
+    // Without this, RuntimeSchemaManager has no injected runner and falls back to spawning a
+    // child-process CodeGen. On Postgres that child path is slow, its output is buffered (so
+    // progress is unobservable), and a non-responding advancedGen AI pass hangs it indefinitely
+    // — which leaves association/junction CRUD functions un-regenerated and blocks the sync.
+    // Running in-process keeps CodeGen inside the MJAPI event loop where it is observable and
+    // bounded by advanced_generation's per-call timeout + circuit breaker. Mirrors the SQL
+    // Server path below (the runner is required for BOTH platforms).
+    const pgCodegenUser = process.env.CODEGEN_DB_USERNAME;
+    const pgCodegenPass = process.env.CODEGEN_DB_PASSWORD;
+    if (pgCodegenUser && pgCodegenPass) {
+      try {
+        const codegenPgPool = new pg.default.Pool({
+          host: pgHost,
+          port: pgPort,
+          user: pgCodegenUser,
+          password: pgCodegenPass,
+          database: pgDatabase,
+          max: 10,
+        });
+        const codegenTestClient = await codegenPgPool.connect();
+        await codegenTestClient.query('SELECT 1');
+        codegenTestClient.release();
+
+        const { RuntimeSchemaManager } = await import('@memberjunction/schema-engine');
+        const codegenPgConfigData = new PostgreSQLProviderConfigData(
+          { Host: pgHost, Port: pgPort, Database: pgDatabase, User: pgCodegenUser, Password: pgCodegenPass },
+          mj_core_schema,
+          cacheRefreshInterval / 1000, // ms → seconds
+        );
+        const codegenPgProvider = new PostgreSQLDataProvider();
+        await codegenPgProvider.Config(codegenPgConfigData); // separate pool (per-instance manager); does NOT touch the global API provider
+        RuntimeSchemaManager.Instance.SetDDLProvider(codegenPgProvider);
+        console.log('RSU DDL provider initialized with CodeGen credentials (PostgreSQL).');
+
+        // Set up in-process CodeGen runner for RSU
+        try {
+          const { RunCodeGenBase } = await import('@memberjunction/codegen-lib');
+          const { PostgreSQLCodeGenConnection } = await import('@memberjunction/codegen-lib/dist/Database/providers/postgresql/PostgreSQLCodeGenConnection.js');
+
+          const codegenConnection = new PostgreSQLCodeGenConnection(codegenPgPool);
+          const codegenCurrentUser = UserCache.Instance.Users.find(u => u.Type?.trim().toLowerCase() === 'owner') ?? UserCache.Instance.Users[0];
+
+          const codegenDataSource = {
+            provider: codegenPgProvider,
+            connection: codegenConnection,
+            currentUser: codegenCurrentUser,
+            connectionInfo: `${pgHost}:${pgPort}/${pgDatabase} (CodeGen)`,
+          };
+
+          const runObject = MJGlobal.Instance.ClassFactory.CreateInstance(RunCodeGenBase) as InstanceType<typeof RunCodeGenBase>;
+
+          const rsuWorkDir = process.env.RSU_WORK_DIR || process.cwd();
+          RuntimeSchemaManager.Instance.SetCodeGenRunner({
+            RunInProcess: (skipDB) => runObject.RunInProcess(codegenDataSource, skipDB, rsuWorkDir),
+          });
+          console.log('RSU in-process CodeGen runner initialized (PostgreSQL).');
+
+          // Inject CodeGen output paths for targeted git staging
+          const { initializeConfig } = await import('@memberjunction/codegen-lib');
+          const cgConfig = initializeConfig(rsuWorkDir);
+          const outputPaths = (cgConfig.output ?? []).map((o: { directory: string }) => o.directory);
+          RuntimeSchemaManager.Instance.SetCodeGenOutputPaths(outputPaths);
+          console.log(`RSU CodeGen output paths: ${outputPaths.length} directories configured.`);
+
+          // Point RSU's soft PK/FK writer at the SAME file CodeGen reads (mj.config.cjs
+          // `additionalSchemaInfo`), or RSU writes soft PKs to its own default path while
+          // CodeGen reads a different one and skips integration tables with "No primary key found".
+          if (cgConfig.additionalSchemaInfo) {
+            RuntimeSchemaManager.Instance.SetAdditionalSchemaInfoPath(cgConfig.additionalSchemaInfo);
+            console.log(`RSU additionalSchemaInfo path: ${cgConfig.additionalSchemaInfo}`);
+          }
+        } catch (codegenErr) {
+          console.warn(`RSU in-process CodeGen runner setup failed (will fall back to child process): ${(codegenErr as Error).message}`);
+        }
+      } catch (err) {
+        console.warn(`RSU DDL provider setup failed (PostgreSQL; RSU will fall back to default provider): ${(err as Error).message}`);
+      }
+    }
+
     const md = new Metadata(); // global-provider-ok: bootstrap
     console.log(`Data Source has been initialized. ${md?.Entities ? md.Entities.length : 0} entities loaded.`);
   } else {
@@ -347,6 +436,13 @@ export const serve = async (resolverPaths: Array<string>, app: Application = cre
           ...createMSSQLConfig(),
           user: codegenUser,
           password: codegenPass,
+          // CodeGen's metadata management ("manage entity fields", schema refresh) runs
+          // long-running queries across ALL entities. The default API requestTimeout (30s)
+          // is far too short at scale — e.g. a large integration Create-Tables pushing the
+          // schema to 400+ entities times out mid-refresh and leaves entity-field metadata
+          // only partially applied. This pool is used ONLY for CodeGen/DDL (never to serve
+          // API requests), so a generous timeout is safe. Mirrors MJCLI's baseline connection.
+          requestTimeout: 600000,
         });
         codegenPool.on('error', (err) => {
           console.error('[ConnectionPool] CodeGen pool connection error:', err.message);
@@ -389,6 +485,15 @@ export const serve = async (resolverPaths: Array<string>, app: Application = cre
           const outputPaths = (codegenConfig.output ?? []).map((o: { directory: string }) => o.directory);
           RuntimeSchemaManager.Instance.SetCodeGenOutputPaths(outputPaths);
           console.log(`RSU CodeGen output paths: ${outputPaths.length} directories configured.`);
+
+          // Point RSU's soft PK/FK writer at the SAME file CodeGen reads (mj.config.cjs
+          // `additionalSchemaInfo`). Without this, RSU writes soft PKs to its own default
+          // path while CodeGen reads a different one and skips every integration table
+          // with "No primary key found".
+          if (codegenConfig.additionalSchemaInfo) {
+            RuntimeSchemaManager.Instance.SetAdditionalSchemaInfoPath(codegenConfig.additionalSchemaInfo);
+            console.log(`RSU additionalSchemaInfo path: ${codegenConfig.additionalSchemaInfo}`);
+          }
         } catch (codegenErr) {
           console.warn(`RSU in-process CodeGen runner setup failed (will fall back to child process): ${(codegenErr as Error).message}`);
         }
@@ -619,6 +724,24 @@ export const serve = async (resolverPaths: Array<string>, app: Application = cre
     (topic: string, payload: Record<string, unknown>) => PubSubManager.Instance.Publish(topic, payload)
   );
 
+  // §11: fan every integration progress event onto the live GraphQL subscription topic. The emitter
+  // (in @memberjunction/integration-progress-artifacts) stays server-agnostic; we inject the publish
+  // here so integration runs/refreshes/syncs are subscribable in addition to the durable JSONL
+  // artifact + the pollable IntegrationTailRunEvents query.
+  IntegrationProgressEmitter.SetPublishHook((manifest, event) =>
+    PublishIntegrationProgress({
+      RunID: manifest.runID,
+      Kind: manifest.runKind,
+      CompanyIntegrationID: manifest.companyIntegrationID,
+      EventType: event.eventType,
+      Seq: event.seq,
+      Message: event.message,
+      Stage: event.stage,
+      Level: event.level,
+      Data: event.data,
+    })
+  );
+
   // Global listener: broadcast CACHE_INVALIDATION to all browser clients whenever
   // ANY BaseEntity save/delete occurs on this server — regardless of whether it
   // originated from a GraphQL mutation or internal server-side code (agents, actions,
@@ -651,10 +774,15 @@ export const serve = async (resolverPaths: Array<string>, app: Application = cre
         scalarsMap: [{ type: Date, scalar: GraphQLTimestamp }],
         emitSchemaFile: websiteRunFromPackage !== 1,
         pubSub,
+        globalMiddlewares: [variablesLoggingMiddleware],
       }),
     ],
     typeDefs: [requireSystemUserDirective.typeDefs, publicDirective.typeDefs],
   });
+
+  // Verbose-mode-only diagnostic: name custom-resolver args that aren't metadata-bound
+  // and aren't @NoLog-marked. No-op in default config (logVariables=false).
+  auditResolversForUndecoratedArgs();
   schema = requireSystemUserDirective.transformer(schema);
   schema = publicDirective.transformer(schema);
 
@@ -668,27 +796,70 @@ export const serve = async (resolverPaths: Array<string>, app: Application = cre
   const httpServer = createServer(app);
 
   const webSocketServer = new WebSocketServer({ server: httpServer, path: graphqlRootPath });
-  const serverCleanup = useServer(
+
+  // Track per-connection expiry timers so we can clean them up on close
+  const expiryTimers = new WeakMap<object, ReturnType<typeof setTimeout>>();
+
+  const serverCleanup = useServer<Record<string, unknown>, { userPayload: UserPayload }>(
     {
       schema,
-      context: async ({ connectionParams }) => {
-        const userPayload = await getUserPayload(String(connectionParams?.Authorization), undefined, dataSources);
-        return { userPayload };
-      },
-      onError: (ctx, message, errors) => {
-        // Check if error is token expiration (expected behavior)
-        const isTokenExpired = errors.some(err =>
-          err.extensions?.code === 'JWT_EXPIRED' ||
-          err.message?.includes('token has expired')
-        );
+      // RAII: validate the token once at connection time and cache the result.
+      // This prevents re-validating (and re-logging) on every subscription message.
+      onConnect: async (ctx) => {
+        try {
+          const token = String(ctx.connectionParams?.Authorization);
+          const userPayload = await getUserPayload(token, undefined, dataSources);
 
-        if (isTokenExpired) {
-          // Log at warn level - this is expected from long-lived browser sessions
-          console.warn('WebSocket connection token expired - client should reconnect with refreshed token');
-        } else {
-          // Log actual errors at error level
-          console.error('WebSocket error:', errors);
+          // Store validated payload on the connection for use in context()
+          ctx.extra.userPayload = userPayload;
+
+          // Schedule proactive socket close at token expiry so the client
+          // reconnects with a fresh token instead of spamming errors.
+          const decoded = jwt.decode(token.replace('Bearer ', ''));
+          if (decoded && typeof decoded !== 'string' && decoded.exp) {
+            const msUntilExpiry = decoded.exp * 1000 - Date.now();
+            if (msUntilExpiry > 0) {
+              const timer = setTimeout(() => {
+                console.log(`WebSocket token expiring — closing connection for ${userPayload.email}`);
+                // 4403 = Forbidden — retriable in graphql-ws, signals "get a new token"
+                // (4401 is reserved as fatal/"Unauthorized" in the graphql-ws protocol)
+                try {
+                  ctx.extra.socket.close(4403, 'Token expired');
+                } catch {
+                  // Socket may already be closed; benign
+                }
+              }, msUntilExpiry);
+              // Prevent the timer from keeping the process alive during shutdown
+              timer.unref();
+              expiryTimers.set(ctx, timer);
+            }
+          }
+
+          return true;
+        } catch (error: unknown) {
+          // Return false instead of throwing — graphql-ws sends 4403 Forbidden
+          // (retriable) rather than letting the throw produce 1011 (fatal).
+          const msg = error instanceof Error ? error.message : 'Authentication failed';
+          console.warn(`WebSocket connection rejected: ${msg}`);
+          return false;
         }
+      },
+      // context() now just reads the already-validated payload — no I/O, no logging
+      context: async (ctx) => {
+        return { userPayload: ctx.extra.userPayload as UserPayload };
+      },
+      onClose: (ctx) => {
+        // Clear the expiry timer if the connection closes before the token expires
+        const timer = expiryTimers.get(ctx);
+        if (timer) {
+          clearTimeout(timer);
+          expiryTimers.delete(ctx);
+        }
+      },
+      onError: (_ctx, _message, errors) => {
+        // Token expiry errors can't happen anymore (handled in onConnect + timer),
+        // so all errors here are genuine and worth logging.
+        console.error('WebSocket error:', errors);
       },
     },
     webSocketServer
@@ -890,6 +1061,15 @@ export const serve = async (resolverPaths: Array<string>, app: Application = cre
   if (resumeUser) {
     IntegrationEngine.Instance.ResumeOrphanedSyncs(resumeUser)
       .catch(err => console.warn(`[IntegrationEngine] Orphaned sync resume failed: ${err}`));
+  }
+
+  // Force-fail any agent runs left 'Running' by a process that died (restart/crash/OOM) or whose
+  // terminal-state write never landed. Staleness-based, so it never touches runs another healthy
+  // instance is still heart-beating. The watchdog also self-registers for graceful-shutdown
+  // cancellation (via ShutdownRegistry) once it begins tracking this process's first live run.
+  if (resumeUser && Metadata.Provider instanceof DatabaseProviderBase) { // global-provider-ok: server startup recovery — one-shot orphaned-run sweep at boot
+    AgentRunWatchdog.SweepOrphanedRuns(Metadata.Provider, resumeUser) // global-provider-ok: server startup recovery — one-shot orphaned-run sweep at boot
+      .catch(err => console.warn(`[AgentRunWatchdog] Startup sweep failed: ${err}`));
   }
 
   // Set up graceful shutdown handlers

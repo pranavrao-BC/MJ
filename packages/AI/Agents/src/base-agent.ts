@@ -13,7 +13,8 @@
 
 import { MJAIAgentTypeEntity,  MJTemplateParamEntity, MJActionParamEntity, MJAIAgentRelationshipEntity, MJAIAgentNoteEntity, MJAIAgentExampleEntity, MJConversationDetailEntity, MJAIAgentRequestEntity, MJAIAgentRequestTypeEntity, FileStorageEngineBase } from '@memberjunction/core-entities';
 import { MJAIAgentRunEntityExtended, MJAIAgentRunStepEntityExtended, MJAIPromptEntityExtended, MJAIAgentEntityExtended } from "@memberjunction/ai-core-plus";
-import { UserInfo, Metadata, RunView, LogStatus, LogStatusEx, LogError, LogErrorEx, IsVerboseLoggingEnabled, IMetadataProvider } from '@memberjunction/core';
+import { UserInfo, Metadata, RunView, LogStatus, LogStatusEx, LogError, LogErrorEx, IsVerboseLoggingEnabled, IMetadataProvider, DatabaseProviderBase } from '@memberjunction/core';
+import { AgentRunWatchdog } from './agent-run-watchdog';
 import { AIPromptRunner } from '@memberjunction/ai-prompts';
 import { ChatMessage, ChatMessageContent, ChatMessageContentBlock, AIErrorType } from '@memberjunction/ai';
 import { BaseAgentType } from './agent-types/base-agent-type';
@@ -56,13 +57,26 @@ import {
     AgentClientToolInvocation,
     ClientToolResultSummary,
     ClientToolMetadata,
-    InputArtifact
+    InputArtifact,
+    AgentPipelineRequest
 } from '@memberjunction/ai-core-plus';
 import { MJActionEntityExtended, ActionResult, ActionParam, AIDirective } from '@memberjunction/actions-base';
 import { AgentRunner } from './AgentRunner';
 import { PayloadManager, PayloadManagerResult, PayloadChangeResultSummary } from './PayloadManager';
 import { ScratchpadManager } from './ScratchpadManager';
 import { ArtifactToolManager, ArtifactToolCall, StoredToolResult } from './ArtifactToolManager';
+import {
+    PipelineExecutor,
+    PipelineToolRegistry,
+    PipelineInvocable,
+    PipelineExecutionResult,
+    PipelineStage,
+    ActionInvocable,
+    ArtifactToolInvocable,
+    BuildPipelineToolDocs,
+    formatFinalOutput,
+    summarizePipelineStages,
+} from './pipeline';
 import { AgentPayloadChangeRequest } from '@memberjunction/ai-core-plus';
 import { AgentDataPreloader } from './AgentDataPreloader';
 import { ClientToolRequestManager } from './ClientToolRequestManager';
@@ -177,6 +191,40 @@ type ExtendedProgressStep = Parameters<AgentExecutionProgressCallback>[0] & {
  * const result = await agent.Execute(params);
  * ```
  */
+/**
+ * Maximum number of sub-agents to dispatch concurrently when a Loop agent
+ * returns a `subAgents` array. Prevents a misbehaving LLM (or an over-eager
+ * one) from saturating the model API / DB pool with N concurrent runs.
+ */
+const PARALLEL_SUBAGENT_CONCURRENCY_LIMIT = 5;
+
+/**
+ * Result envelope returned by `dispatchSingleSubAgentInParallel` — combines the
+ * execution outcome with the metadata needed to merge results back into the
+ * parent payload deterministically.
+ */
+interface ParallelSubAgentExecution<SR> {
+    request: AgentSubAgentRequest<unknown>;
+    result: ExecuteAgentResult<SR>;
+    subAgentEntity: MJAIAgentEntityExtended;
+    relationship?: MJAIAgentRelationshipEntity;
+    /** Undefined only for synthetic entries representing an unresolved sub-agent. */
+    stepEntity?: MJAIAgentRunStepEntityExtended;
+    upstreamPaths: string[];
+}
+
+/**
+ * Synchronously-prepared dispatch record for one parallel sub-agent. We resolve
+ * the entity, push the delegation message, and emit progress BEFORE
+ * `Promise.all` so the transcript order is deterministic and matches the
+ * source order of the `subAgents` array.
+ */
+interface ParallelSubAgentDispatch {
+    request: AgentSubAgentRequest<unknown>;
+    subAgentEntity: MJAIAgentEntityExtended;
+    relationship?: MJAIAgentRelationshipEntity;
+}
+
 export class BaseAgent {
     /**
      * Maximum allowed validation retries before forcing failure.
@@ -197,6 +245,23 @@ export class BaseAgent {
      * @private
      */
     private _promptRunner: AIPromptRunner = new AIPromptRunner();
+
+    /**
+     * List of pending database save Promises for observability step records.
+     * Awaited concurrently in finalizeAgentRun() to prevent blocking.
+     */
+    private _pendingSaves: Promise<boolean>[] = [];
+
+    /**
+     * Queue map to chain database saves sequentially per step entity.
+     * Prevents UPDATE queries running before INSERT queries on quick steps.
+     *
+     * Keyed by the step ENTITY INSTANCE, not its `ID`: a new step's `ID` is empty at create time and
+     * only gets populated during its INSERT `Save()`, so keying by `ID` would file the create and the
+     * finalize under different buckets and defeat the chain — letting the UPDATE race ahead of the
+     * INSERT on millisecond-fast steps (e.g. pipelines), which left them stuck at `Running`.
+     */
+    private _stepSavePromises: Map<MJAIAgentRunStepEntityExtended, Promise<any>> = new Map();
 
     /**
      * Active per-request metadata provider, set at the start of Execute().
@@ -408,7 +473,12 @@ export class BaseAgent {
      * This prevents context overflow when action results contain large base64 data (images, audio, video).
      *
      * Uses generic ValueType=MediaOutput detection from action metadata to identify media output params.
-     * Intercepted media is stored in _mediaOutputs with refId and persist=false (not saved unless used).
+     *
+     * Intercepted media is stored in `_mediaOutputs` with a generated `refId` and is **always
+     * persisted** by `AgentRunner` — all media outputs are saved to `AIAgentRunMedia` +
+     * `ConversationDetailAttachment` (which auto-pairs to an artifact via the server hook).
+     * The `${media:<refId>}` placeholder injected into the action result keeps the LLM's
+     * context window small; the LLM is told the media will be displayed automatically.
      *
      * @param actionParams - The output parameters from an action result
      * @param actionEntity - Optional action entity metadata for ValueType checking
@@ -450,11 +520,10 @@ export class BaseAgent {
                         // Generate unique reference ID
                         const refId = `media-${Date.now().toString(36)}-${i}-${Math.random().toString(36).substring(2, 8)}`;
 
-                        // Store in unified media outputs with persist=false (won't be saved unless placeholder is used)
+                        // Store in unified media outputs — always persisted by AgentRunner.
                         this._mediaOutputs.push({
                             ...media,
                             refId,
-                            persist: false  // Not persisted unless placeholder is resolved in final output
                         });
 
                         references.push(`\${media:${refId}}`);
@@ -470,7 +539,7 @@ export class BaseAgent {
                         Value: {
                             mediaReferences: references,
                             count: mediaItems.length,
-                            note: `${extractedCount} media item(s) extracted. Use placeholder syntax in your response: <img src="${references[0]}" alt="description" />`
+                            note: `${extractedCount} media item(s) extracted and will be displayed to the user automatically.`
                         }
                     });
                     this.logStatus(`📦 Extracted ${extractedCount} ${param.Name} item(s) to media references`, true);
@@ -485,14 +554,13 @@ export class BaseAgent {
                 if (isMediaOutputParam || base64Pattern.test(param.Value.substring(0, 1000))) {
                     const refId = `data-${Date.now().toString(36)}-${Math.random().toString(36).substring(2, 8)}`;
 
-                    // Store in unified media outputs with persist=false
+                    // Store in unified media outputs — always persisted by AgentRunner.
                     this._mediaOutputs.push({
                         modality: 'Image', // Default to image, could be enhanced with mime detection
                         mimeType: 'application/octet-stream',
                         data: param.Value,
                         label: `Media data from ${param.Name}`,
                         refId,
-                        persist: false
                     });
 
                     sanitizedParams.push({
@@ -513,43 +581,53 @@ export class BaseAgent {
     }
 
     /**
-     * Resolves media placeholders in a string.
-     * Replaces ${media:ref-id} with actual data URIs (data:mime;base64,...).
-     * Sets persist=true on resolved media so it will be saved to AIAgentRunMedia.
+     * Substitutes `${media:<refId>}` placeholders in a string with the actual
+     * data URI (`data:<mime>;base64,<bytes>`) of the matching intercepted media item.
+     *
+     * Used for payload / actionable-command resolution at the terminal step, where the
+     * LLM wants to embed image (or other media) data inline at a specific position in
+     * its structured output rather than as a trailing attachment card. The string
+     * variant of placeholder resolution; recursive walker lives in
+     * {@link resolveMediaPlaceholdersInPayload}.
+     *
+     * This function only does substitution — it has no persistence side effects.
      *
      * @param text - The string that may contain media placeholders
-     * @returns String with placeholders resolved to actual data URIs
+     * @returns String with placeholders resolved to actual data URIs (or the original
+     *          placeholder if the refId is unknown — defensive, shouldn't happen)
      * @private
      * @since 3.1.0
      */
     private resolveMediaPlaceholdersInString(text: string): string {
-        // Check if any media has a refId (meaning we have intercepted media to resolve)
+        // Fast path: nothing to resolve if there are no intercepted media items.
         const hasRefIds = this._mediaOutputs.some(m => m.refId);
         if (!text || !hasRefIds) {
             return text;
         }
 
-        // Match ${media:ref-id} pattern
+        // Match ${media:ref-id} pattern (lowercase letters, digits, dashes only —
+        // matches the IDs generated by interceptLargeBinaryContent).
         const placeholderRegex = /\$\{media:([a-z0-9-]+)\}/g;
 
         return text.replace(placeholderRegex, (match, refId: string) => {
             const media = this._mediaOutputs.find(m => m.refId === refId);
             if (media?.data) {
-                // Mark for persistence since it's being used in final output
-                media.persist = true;
                 return `data:${media.mimeType};base64,${media.data}`;
             }
-            // Keep placeholder if not found (shouldn't happen in normal flow)
+            // Unknown refId — leave the placeholder in place rather than emit a broken
+            // data URI. Defensive; this branch should not fire in normal flow.
             this.logStatus(`⚠️ Media reference '${refId}' not found in registry`, true);
             return match;
         });
     }
 
     /**
-     * Resolves media placeholders in a payload of any type.
-     * - For strings: resolves placeholders directly
-     * - For objects: recursively processes all string properties
-     * - For arrays: recursively processes all elements
+     * Resolves `${media:<refId>}` placeholders anywhere inside an arbitrary payload.
+     *   - Strings: resolves placeholders directly
+     *   - Objects: recursively processes every string property
+     *   - Arrays:  recursively processes every element
+     *
+     * Pure resolution — no persistence side effects.
      *
      * @param payload - The payload that may contain media placeholders in string values
      * @returns Payload with all placeholders resolved to actual data URIs
@@ -557,24 +635,12 @@ export class BaseAgent {
      * @since 3.1.0
      */
     private resolveMediaPlaceholdersInPayload<T>(payload: T): T {
-        // Check if any media has a refId (meaning we have intercepted media to resolve)
+        // Fast path: nothing to resolve if no intercepted media exists.
         const hasRefIds = this._mediaOutputs.some(m => m.refId);
         if (!hasRefIds) {
             return payload;
         }
-
-        // Count how many media items have persist=false before resolution
-        const unpersisted = this._mediaOutputs.filter(m => m.refId && m.persist === false).length;
-        const resolved = this.resolveMediaPlaceholdersRecursive(payload);
-        // Count how many were marked for persistence (persist changed from false to true)
-        const persistedAfter = this._mediaOutputs.filter(m => m.refId && m.persist === true).length;
-        const resolvedCount = persistedAfter - (unpersisted - this._mediaOutputs.filter(m => m.refId && m.persist === false).length);
-
-        if (resolvedCount > 0) {
-            this.logStatus(`✅ Resolved ${resolvedCount} media placeholder(s) in final payload`, true);
-        }
-
-        return resolved;
+        return this.resolveMediaPlaceholdersRecursive(payload);
     }
 
     /**
@@ -607,61 +673,6 @@ export class BaseAgent {
 
         // Return primitives (numbers, booleans) as-is
         return value;
-    }
-
-    /**
-     * Processes media placeholders in agent messages for conversational agents.
-     *
-     * Unlike artifact-based agents (which embed images in HTML payload), conversational agents
-     * should display images via ConversationDetailAttachment. This method:
-     * 1. Detects ${media:xxx} placeholders in the message
-     * 2. Sets persist=true on referenced media (triggers save to AIAgentRunMedia)
-     * 3. Strips media HTML tags from the message (images display via attachment instead)
-     *
-     * @param message - The message that may contain media placeholders
-     * @returns Cleaned message with media tags stripped
-     * @private
-     * @since 3.1.0
-     */
-    private processMessageMediaPlaceholders(message: string): string {
-        if (!message) {
-            return message;
-        }
-
-        // Check if any media has a refId (meaning we have intercepted media)
-        const hasRefIds = this._mediaOutputs.some(m => m.refId);
-        if (!hasRefIds) {
-            return message;
-        }
-
-        // Find all ${media:xxx} placeholders and mark referenced media for persistence
-        const placeholderRegex = /\$\{media:([a-zA-Z0-9_-]+)\}/g;
-        let match;
-        let promotedCount = 0;
-
-        while ((match = placeholderRegex.exec(message)) !== null) {
-            const refId = match[1];
-            const media = this._mediaOutputs.find(m => m.refId === refId);
-            if (media && media.persist !== true) {
-                media.persist = true;  // Triggers save to AIAgentRunMedia
-                promotedCount++;
-            }
-        }
-
-        if (promotedCount > 0) {
-            this.logStatus(`📎 Auto-promoted ${promotedCount} media output(s) from message placeholders`, true);
-        }
-
-        // Strip <img>, <audio>, <video> tags containing media placeholders
-        // The media will display via ConversationDetailAttachment instead
-        let cleanedMessage = message
-            .replace(/<img[^>]*src=["']\$\{media:[^}]+\}["'][^>]*\/?>/gi, '')
-            .replace(/<audio[^>]*src=["']\$\{media:[^}]+\}["'][^>]*>.*?<\/audio>/gi, '')
-            .replace(/<video[^>]*src=["']\$\{media:[^}]+\}["'][^>]*>.*?<\/video>/gi, '')
-            .replace(/\n\s*\n\s*\n/g, '\n\n')  // Clean up excessive newlines
-            .trim();
-
-        return cleanedMessage;
     }
 
     /**
@@ -723,6 +734,30 @@ export class BaseAgent {
      */
     private _fileOutputs: FileOutputRef[] = [];
 
+    // ───────────────────────── Sub-class state accessors ──────────────────────────
+    // Read-only `protected` getters so driver sub-classes (e.g. Skip) can inspect
+    // the current run's state without being able to corrupt internal invariants.
+    // Mutations still flow through the framework's own methods (createStepEntity,
+    // queueStepSave, incrementExecutionCount, etc.).
+    // (`AgentRun` and `MediaOutputs` are already public getters above; the
+    // accessors below cover state that previously had no external surface.)
+
+    /** Depth of this agent in the execution hierarchy (0 = root). @protected */
+    protected get Depth(): number { return this._depth; }
+
+    /** Agent name hierarchy from root to current (e.g. `['Sage', 'Skip', 'Researcher']`). @protected */
+    protected get AgentHierarchy(): readonly string[] { return this._agentHierarchy; }
+
+    /** Parent step counts used to build the `2.1.3` hierarchical step label. @protected */
+    protected get ParentStepCounts(): readonly number[] { return this._parentStepCounts; }
+
+    /**
+     * Accumulated file outputs (PDF, Excel, Word, etc.) produced this run.
+     * Mirrors the existing `MediaOutputs` accessor pattern but is scoped to
+     * driver sub-classes since it's a more internal collection.
+     * @protected
+     */
+    protected get FileOutputs(): FileOutputRef[] { return this._fileOutputs; }
 
     /**
      * Payload manager for handling payload access control.
@@ -2193,6 +2228,22 @@ export class BaseAgent {
                 this.logStatus(`[ArtifactTools] Artifacts present but tools disabled by agent config (includeArtifactToolsDocs=false)`, true, params);
             }
 
+            // Inject pipeline tool docs when pipelines are enabled and at least one source exists.
+            // A pipeline's first step must be a source (Action or artifact tool); with none
+            // available pipelines are impossible, so BuildPipelineToolDocs returns '' and the
+            // template's `{{ _PIPELINE_TOOLS }}` block stays empty.
+            const pipelineDocsEnabled = agentTypePromptParams?.includePipelineDocs !== false;
+            if (pipelineDocsEnabled) {
+                const sourceNames = [
+                    ...this.getEffectiveActionsForValidation(params.agent.ID).map((a) => a.Name),
+                    ...this._artifactToolManager.GetAvailableToolNames(),
+                ];
+                const pipelineDocs = BuildPipelineToolDocs(sourceNames);
+                if (pipelineDocs) {
+                    promptParams.data['_PIPELINE_TOOLS'] = pipelineDocs;
+                }
+            }
+
             // Pass file artifacts as candidate native file inputs.
             // The AIPromptRunner will check these against the resolved driver's
             // FileCapabilities and attach qualifying files as native content blocks.
@@ -2376,6 +2427,26 @@ export class BaseAgent {
      * @param nextStep 
      * @returns 
      */
+    /**
+     * Returns the list of sub-agent requests on a next-step decision, normalizing
+     * the singular (`subAgent`) and plural (`subAgents`) forms. Plural takes
+     * precedence when both are present (parallel fan-out); otherwise the singular
+     * form is wrapped into a single-element array. Empty if neither is set.
+     *
+     * Use this anywhere code needs to enumerate the sub-agents an LLM requested
+     * — keeps validation and execution paths consistent and avoids the regression
+     * where one path read `.subAgent?.name` and missed parallel requests.
+     */
+    protected getRequestedSubAgents<P, C>(
+        nextStep: BaseAgentNextStep<P, C> | undefined | null
+    ): AgentSubAgentRequest<C>[] {
+        if (!nextStep) return [];
+        if (nextStep.subAgents && nextStep.subAgents.length > 0) {
+            return nextStep.subAgents;
+        }
+        return nextStep.subAgent ? [nextStep.subAgent] : [];
+    }
+
     protected async validateSubAgentNextStep<P>(
         params: ExecuteAgentParams,
         nextStep: BaseAgentNextStep<P>,
@@ -2383,53 +2454,72 @@ export class BaseAgent {
         agentRun: MJAIAgentRunEntityExtended,
         currentStep: MJAIAgentRunStepEntityExtended
     ): Promise<BaseAgentNextStep<P>> {
-        // check to make sure the current agent can execute the specified sub-agent
-        const name = nextStep.subAgent?.name;
         const curAgentSubAgents = AIEngine.Instance.GetSubAgents(params.agent.ID, 'Active');
-        const subAgent = curAgentSubAgents.find(a => a.Name.trim().toLowerCase() === name?.trim().toLowerCase());
-        
-        if (!name || !subAgent) {
-            this.logError(`Sub-agent '${name}' not found or not active for agent '${params.agent.Name}'`, {
+
+        // Collect requested sub-agents. Prefer plural `subAgents` (parallel fan-out);
+        // fall back to singular `subAgent` for the classic single-sub-agent next step.
+        const requested = this.getRequestedSubAgents<P, any>(nextStep);
+
+        if (requested.length === 0) {
+            this.logError(`Sub-agent 'undefined' not found or not active for agent '${params.agent.Name}'`, {
                 agent: params.agent,
                 category: 'SubAgentExecution'
             });
-            // Increment validation retry count since we're changing to Retry
             if (nextStep.step !== 'Retry') {
                 this._generalValidationRetryCount++;
             }
             return {
                 step: 'Retry',
-                terminate: false, // this will kick it back to the prompt to run again
-                errorMessage: `Sub-agent '${name}' not found or not active`
+                terminate: false,
+                errorMessage: `Sub-agent 'undefined' not found or not active`
             };
         }
 
-        // Check MaxExecutionsPerRun limit
-        if (subAgent.MaxExecutionsPerRun != null) {
-            const executionCount = await this.getSubAgentExecutionCount(agentRun.ID, subAgent.ID);
-            if (executionCount >= subAgent.MaxExecutionsPerRun) {
-                this.logError(`Sub-agent '${name}' has reached its maximum execution limit of ${subAgent.MaxExecutionsPerRun}`, {
+        // Validate each requested sub-agent: existence + MaxExecutionsPerRun
+        for (const req of requested) {
+            const name = req?.name;
+            const subAgent = curAgentSubAgents.find(a => a.Name.trim().toLowerCase() === name?.trim().toLowerCase());
+
+            if (!name || !subAgent) {
+                this.logError(`Sub-agent '${name}' not found or not active for agent '${params.agent.Name}'`, {
                     agent: params.agent,
-                    category: 'SubAgentExecution',
-                    metadata: {
-                        subAgentName: name,
-                        executionCount,
-                        maxExecutions: subAgent.MaxExecutionsPerRun
-                    }
+                    category: 'SubAgentExecution'
                 });
-                // Increment validation retry count since we're changing to Retry
                 if (nextStep.step !== 'Retry') {
                     this._generalValidationRetryCount++;
                 }
                 return {
                     step: 'Retry',
                     terminate: false,
-                    errorMessage: `Sub-agent '${name}' has reached its maximum execution limit of ${subAgent.MaxExecutionsPerRun}`
+                    errorMessage: `Sub-agent '${name}' not found or not active`
                 };
+            }
+
+            if (subAgent.MaxExecutionsPerRun != null) {
+                const executionCount = await this.getSubAgentExecutionCount(agentRun.ID, subAgent.ID);
+                if (executionCount >= subAgent.MaxExecutionsPerRun) {
+                    this.logError(`Sub-agent '${name}' has reached its maximum execution limit of ${subAgent.MaxExecutionsPerRun}`, {
+                        agent: params.agent,
+                        category: 'SubAgentExecution',
+                        metadata: {
+                            subAgentName: name,
+                            executionCount,
+                            maxExecutions: subAgent.MaxExecutionsPerRun
+                        }
+                    });
+                    if (nextStep.step !== 'Retry') {
+                        this._generalValidationRetryCount++;
+                    }
+                    return {
+                        step: 'Retry',
+                        terminate: false,
+                        errorMessage: `Sub-agent '${name}' has reached its maximum execution limit of ${subAgent.MaxExecutionsPerRun}`
+                    };
+                }
             }
         }
 
-        // if we get here, the next step is valid and we can return it
+        // All requested sub-agents are valid
         return nextStep;
     }
 
@@ -3995,9 +4085,10 @@ The context is now within limits. Please retry your request with the recovered c
         const body = toolResults.map((r, i) => {
             const heading = `### ${i + 1}. ${r.artifactId}.${r.tool}(${JSON.stringify(r.input)})`;
             if (r.result.success) {
-                const data = typeof r.result.data === 'string'
+                const raw = typeof r.result.data === 'string'
                     ? r.result.data
                     : JSON.stringify(r.result.data, null, 2);
+                const data = this.capStandaloneToolResultText(raw);
                 return `${heading}\n\`\`\`json\n${data}\n\`\`\``;
             }
             return `${heading}\n**Error:** ${r.result.errorMessage}`;
@@ -4013,6 +4104,180 @@ The context is now within limits. Please retry your request with the recovered c
                 // first-N-chars preview. The LLM is taught (via the loop-agent
                 // system prompt) that older tool results are summarised and that
                 // it can re-call the tool if it needs the full result back.
+                expirationTurns: 3,
+                expirationMode: 'Compact',
+                compactMode: 'First N Chars',
+                compactLength: 500,
+                compactPromptId: '',
+            },
+        };
+        params.conversationMessages.push(message);
+    }
+
+    /**
+     * Character budget (~4 chars/token) for a SINGLE standalone artifact-tool result injected into
+     * the conversation. A `get_full` on a large artifact can otherwise dump the whole thing into
+     * context and overflow the model's window — the exact failure pipelines exist to avoid. Override
+     * in a subclass to tune. Pipelines are unaffected: their intermediate results never flow through
+     * here, and the executor already caps a pipeline's final output.
+     *
+     * @protected
+     */
+    protected get maxStandaloneToolResultChars(): number {
+        return 100_000; // ~25k tokens
+    }
+
+    /**
+     * Bound a standalone tool result to {@link maxStandaloneToolResultChars}: return a head slice
+     * plus a redirect that teaches the agent to page (`get_rows`) or reduce (`pipeline`) instead of
+     * reading a whole large artifact. Mirrors how read/search tools cap output at the tool boundary.
+     *
+     * @protected
+     */
+    protected capStandaloneToolResultText(text: string): string {
+        const budget = this.maxStandaloneToolResultChars;
+        if (text.length <= budget) {
+            return text;
+        }
+        const omitted = text.length - budget;
+        return (
+            text.slice(0, budget) +
+            `\n\n…[truncated ${omitted.toLocaleString()} chars. This artifact is too large to read whole ` +
+            `(~${Math.round(text.length / 4000)}k tokens) — reading it in full overflows the context window. ` +
+            `Instead: page it with get_rows(start, count), or run a pipeline that filters/aggregates it ` +
+            `server-side (where / select / groupBy → only the small final result returns to you).]`
+        );
+    }
+
+    /**
+     * Builds a per-run {@link PipelineToolRegistry} that unifies the three pipeline-able
+     * substrates behind one namespace: built-in transforms, the agent's effective Actions, and
+     * the run's artifact tools. Transforms register first so their reserved names win; a source
+     * whose name collides with a transform is skipped for pipeline use (still callable normally)
+     * and logged, rather than aborting the whole pipeline.
+     *
+     * @protected
+     */
+    protected buildPipelineRegistry(params: ExecuteAgentParams): PipelineToolRegistry {
+        const registry = new PipelineToolRegistry();
+        const register = (invocable: PipelineInvocable): void => {
+            try {
+                registry.Register(invocable);
+            } catch (e) {
+                this.logStatus(`[Pipeline] Skipped tool "${invocable.toolName}": ${(e as Error).message}`, true, params);
+            }
+        };
+
+        // Operators (where/select/map/…) are pure code-defined verbs, not registry tools — only
+        // capabilities (Actions + artifact tools) live here as pipeline sources/stages.
+
+        // Actions — each wrapped to run via the existing single-action execution path.
+        this.getEffectiveActionsForValidation(params.agent.ID).forEach((actionEntity) =>
+            register(
+                new ActionInvocable(actionEntity.Name, (p) =>
+                    this.ExecuteSingleAction(params, { name: actionEntity.Name, params: p }, actionEntity, params.contextUser),
+                ),
+            ),
+        );
+
+        // Artifact tools — one invocable per distinct tool name; `artifactId` is supplied as a
+        // call-time param so the same `{ tool, params }` step shape works across all substrates.
+        this._artifactToolManager.GetAvailableToolNames().forEach((toolName) =>
+            register(
+                new ArtifactToolInvocable(toolName, async (tool, p) => {
+                    const stored = await this._artifactToolManager.ExecuteSingleToolCall({
+                        artifactId: String(p.artifactId ?? ''),
+                        tool,
+                        input: p,
+                    });
+                    return stored.result;
+                }),
+            ),
+        );
+
+        return registry;
+    }
+
+    /**
+     * Runs a tool pipeline as a single `Tool` step in the run tree (sibling of the prompt step that
+     * requested it, matching artifact-tool steps). ALL pipeline observability lives in this step's
+     * `OutputData` — the per-stage breakdown, totals, bytes saved, and the tool chain — so there are
+     * no dedicated pipeline entities and no extra SQL I/O; the run tree alone carries everything a
+     * debug UI needs.
+     *
+     * @protected
+     */
+    protected async executePipelineAsStep(
+        pipeline: AgentPipelineRequest,
+        params: ExecuteAgentParams,
+    ): Promise<PipelineExecutionResult> {
+        const stepEntity = await this.createStepEntity({
+            stepType: 'Tool',
+            stepName: `Pipeline: ${pipeline.steps.length} step(s)`,
+            contextUser: params.contextUser,
+            inputData: { steps: pipeline.steps },
+        });
+
+        const registry = this.buildPipelineRegistry(params);
+        // The executor converts stage-level errors into a failed RESULT (it doesn't throw for those),
+        // but an unexpected throw — e.g. a tool returning a non-serializable value (BigInt/circular)
+        // that trips JSON.stringify in the executor's byte-accounting — must NEVER leave this step
+        // stuck on 'Running'. Catch it and materialize a failed result so finalize always runs and the
+        // failure surfaces as a 'Failed' step (answering "do pipeline errors show as errors?": yes).
+        let result: PipelineExecutionResult;
+        try {
+            result = await new PipelineExecutor(registry).Execute(pipeline.steps as PipelineStage[]);
+        } catch (e) {
+            result = {
+                success: false,
+                finalOutput: null,
+                steps: [],
+                error: `Pipeline crashed: ${(e as Error)?.message ?? String(e)}`,
+                contextBytesSaved: 0,
+            };
+        }
+
+        // A pipeline is ONE run-step — not a parent + a child step per stage. It runs server-side in a
+        // single fast pass, so the full per-stage breakdown + totals live in this step's OutputData for
+        // a debug UI to visualize — no separate entities, no extra DB writes.
+        await this.finalizeStepEntity(stepEntity, result.success, result.success ? undefined : result.error, {
+            success: result.success,
+            toolChain: summarizePipelineStages(result.steps),
+            steps: result.steps,
+            contextBytesSaved: result.contextBytesSaved,
+            totalBytesStreamed: result.steps.reduce((sum, s) => sum + s.outputSize, 0),
+            totalDurationMs: result.steps.reduce((sum, s) => sum + s.durationMs, 0),
+            failedStepIndex: result.failedStepIndex,
+        });
+
+        return result;
+    }
+
+    /**
+     * Pushes the pipeline's final output (or its failure message) into the conversation for the
+     * LLM's next turn, mirroring the artifact-tool "inject once, then expire" pattern. Only the
+     * final output is surfaced — intermediate step outputs never enter the context window.
+     *
+     * @protected
+     */
+    protected injectPipelineResultMessage(params: ExecuteAgentParams, result: PipelineExecutionResult): void {
+        const diagnostic = result.success && result.diagnostic
+            ? `\n⚠ Empty result — ${result.diagnostic}`
+            : '';
+        // Identify which pipeline this result belongs to (stage chain, e.g. `get_rows → where →
+        // select`). Without it, multiple pipeline results across turns are indistinguishable once
+        // compacted — mirrors how artifact-tool results name their tool/artifact.
+        const label = summarizePipelineStages(result.steps);
+        const content = result.success
+            ? `Pipeline result [${label}] (final stage value — intermediate stages stayed out of context, ~${result.contextBytesSaved} bytes saved):\n\`\`\`\n${formatFinalOutput(result.finalOutput)}\n\`\`\`${diagnostic}`
+            : `Pipeline failed [${label}].\n${result.error}`;
+
+        const message: AgentChatMessage = {
+            role: 'user',
+            content,
+            metadata: {
+                turnAdded: this._promptTurnCount,
+                messageType: 'tool-result',
                 expirationTurns: 3,
                 expirationMode: 'Compact',
                 compactMode: 'First N Chars',
@@ -4249,7 +4514,8 @@ The context is now within limits. Please retry your request with the recovered c
             { docsFlag: 'includeForEachDocs', responseTypeKey: 'forEach' },
             { docsFlag: 'includeWhileDocs', responseTypeKey: 'while' },
             { docsFlag: 'includeScratchpadDocs', responseTypeKey: 'scratchpad' },
-            { docsFlag: 'includeArtifactToolsDocs', responseTypeKey: 'artifactToolCalls' }
+            { docsFlag: 'includeArtifactToolsDocs', responseTypeKey: 'artifactToolCalls' },
+            { docsFlag: 'includePipelineDocs', responseTypeKey: 'pipeline' }
         ];
 
         for (const { docsFlag, responseTypeKey } of alignmentMappings) {
@@ -4563,6 +4829,7 @@ The context is now within limits. Please retry your request with the recovered c
                 configurationId: params.configurationId, // propagate configuration ID to sub-agent
                 effortLevel: params.effortLevel, // propagate effort level to sub-agent
                 apiKeys: params.apiKeys, // propagate API keys to sub-agent
+                inputArtifacts: params.inputArtifacts, // propagate input artifacts so sub-agents inherit the parent's artifact manifest + tools (e.g. a Codesmith delegate can read a Data Snapshot the parent references)
                 data: {
                         ...params.data,
                         ...subAgentRequest.templateParameters,
@@ -4573,10 +4840,9 @@ The context is now within limits. Please retry your request with the recovered c
                 PrimaryScopeEntityName: params.PrimaryScopeEntityName, // propagate scope to sub-agent
                 PrimaryScopeRecordID: params.PrimaryScopeRecordID,
                 SecondaryScopes: params.SecondaryScopes,
-                // Add callback to link AgentRun ID immediately when created
                 onAgentRunCreated: async (agentRunId: string) => {
                     stepEntity.TargetLogID = agentRunId;
-                    await stepEntity.Save();
+                    this.queueStepSave(stepEntity);
                 }
             });
             
@@ -5340,7 +5606,15 @@ The context is now within limits. Please retry your request with the recovered c
             const errorMessage = JSON.stringify(CopyScalarsAndArrays(this._agentRun.LatestResult));
             throw new Error(`Failed to create agent run record: Details: ${errorMessage}`);
         }
-        
+
+        // Hand the now-persisted run (it has a stable ID) to the watchdog so a process restart,
+        // crash, or failed terminal-state write can't leave it stuck 'Running' forever. Only the
+        // server-side DB provider can heartbeat via SQL; client/non-DB providers simply opt out.
+        const runProvider = params.provider || this._activeProvider;
+        if (runProvider instanceof DatabaseProviderBase && params.contextUser) {
+            AgentRunWatchdog.Instance.Track(this._agentRun.ID, runProvider, params.contextUser);
+        }
+
         // Invoke callback if provided
         if (modifiedParams.onAgentRunCreated) {
             try {
@@ -5407,11 +5681,16 @@ The context is now within limits. Please retry your request with the recovered c
     /**
      * Creates a step entity for tracking.
      *
-     * @private
+     * Exposed as `protected` so driver sub-classes (e.g. Skip) can author custom
+     * `AIAgentRunStep` records with the same setup correctness — `StepNumber`,
+     * hierarchy breadcrumb, UUID validation, payload serialization, and the
+     * `queueStepSave` coupling that keeps INSERT-then-UPDATE ordering safe.
+     *
+     * @protected
      * @param params - Step creation parameters
      * @returns {Promise<MJAIAgentRunStepEntityExtended>} - The created step entity
      */
-    private async createStepEntity(params: {
+    protected async createStepEntity(params: {
         stepType: MJAIAgentRunStepEntityExtended["StepType"];
         stepName: string;
         contextUser: UserInfo;
@@ -5457,9 +5736,7 @@ The context is now within limits. Please retry your request with the recovered c
             });
         }
         
-        if (!await stepEntity.Save()) {
-            throw new Error(`Failed to create agent run step record: ${JSON.stringify(stepEntity.LatestResult)}`);
-        }
+        this.queueStepSave(stepEntity);
         
         // Add the step to the agent run's Steps array
         if (this._agentRun) {
@@ -5522,7 +5799,16 @@ The context is now within limits. Please retry your request with the recovered c
         };
     }
 
-    private async finalizeStepEntity(stepEntity: MJAIAgentRunStepEntityExtended, success: boolean, errorMessage?: string, outputData?: any): Promise<void> {
+    /**
+     * Finalizes a step entity with completion status. Pairs with `createStepEntity`
+     * — drivers that create custom steps should also finalize them through this
+     * method so `Status`/`CompletedAt`/`Success`/`ErrorMessage`/`OutputData` are
+     * populated consistently and the UPDATE is sequenced behind the INSERT via
+     * `queueStepSave`.
+     *
+     * @protected
+     */
+    protected async finalizeStepEntity(stepEntity: MJAIAgentRunStepEntityExtended, success: boolean, errorMessage?: string, outputData?: any): Promise<void> {
         try {
             stepEntity.Status = success ? 'Completed' : 'Failed';
             stepEntity.CompletedAt = new Date();
@@ -5541,13 +5827,79 @@ The context is now within limits. Please retry your request with the recovered c
                 });
             }
             
-            if (!await stepEntity.Save()) {
-                console.error('Failed to update agent run step record');
-            }
+            this.queueStepSave(stepEntity);
         }
         catch (e) {
-            console.error('Failed to update agent run step record', e);
+            LogError(`Failed to update agent run step record: ${(e as Error)?.message ?? e}`, undefined, e);
         }
+    }
+
+    /**
+     * Queues a database save for a step entity.
+     *
+     * - Saves on the same step record are chained (sequenced) to prevent an UPDATE
+     *   from racing the original INSERT.
+     * - Saves on different step records run concurrently.
+     * - Failures are not thrown — they're logged via `LogError` (with the entity's
+     *   `LatestResult.CompleteMessage` per the BaseEntity convention) so the
+     *   agent loop isn't blocked by observability writes — but they ARE surfaced
+     *   in `finalizeAgentRun` so callers see step-record drift.
+     *
+     * Exposed as `protected` so driver sub-classes (e.g. Skip) that author
+     * custom `AIAgentRunStep` records can fire-and-forget saves through the
+     * same chained/non-blocking machinery instead of awaiting `entity.Save()`
+     * inline and blocking the agent loop.
+     *
+     * @protected
+     */
+    protected queueStepSave(stepEntity: MJAIAgentRunStepEntityExtended): void {
+        // Chain on the entity INSTANCE (stable), NOT stepEntity.ID — the ID is empty until the INSERT
+        // Save() assigns it, so an ID-keyed chain breaks for fast create→finalize sequences.
+        const previousSave = this._stepSavePromises.get(stepEntity) ?? Promise.resolve();
+        const currentSave = previousSave.then(() => stepEntity.Save()).then((ok) => {
+            if (!ok) {
+                LogError(
+                    `Failed to save agent run step record ${stepEntity.ID || '(unsaved)'}: ${stepEntity.LatestResult?.CompleteMessage ?? 'unknown error'}`
+                );
+            }
+            return ok;
+        });
+        this._stepSavePromises.set(stepEntity, currentSave);
+        this._pendingSaves.push(currentSave);
+    }
+
+    /**
+     * Maps an array through an async worker with bounded concurrency.
+     * Preserves input order in the output. Used to cap parallel sub-agent and
+     * preload dispatches so a misbehaving LLM (or a runaway data source) can't
+     * exhaust the model API or DB pool.
+     *
+     * Exposed as `protected` so driver sub-classes performing custom parallel
+     * work get the same bounded-fan-out + ordered-results contract for free.
+     *
+     * @protected
+     */
+    protected async mapWithConcurrency<T, R>(
+        items: T[],
+        limit: number,
+        worker: (item: T, index: number) => Promise<R>
+    ): Promise<R[]> {
+        if (items.length === 0) return [];
+        const effectiveLimit = Math.max(1, Math.min(limit, items.length));
+        const results: R[] = new Array(items.length);
+        let next = 0;
+        const runners: Promise<void>[] = [];
+        for (let i = 0; i < effectiveLimit; i++) {
+            runners.push((async () => {
+                while (true) {
+                    const idx = next++;
+                    if (idx >= items.length) return;
+                    results[idx] = await worker(items[idx], idx);
+                }
+            })());
+        }
+        await Promise.all(runners);
+        return results;
     }
 
     /**
@@ -5587,11 +5939,15 @@ The context is now within limits. Please retry your request with the recovered c
     /**
      * Formats a message with agent hierarchy for streaming/progress updates.
      *
-     * @private
+     * Exposed as `protected` so driver sub-classes emit progress events whose
+     * breadcrumbs line up with the framework's own — keeps the Explorer tree
+     * view consistent across custom and built-in dispatch.
+     *
+     * @protected
      * @param {string} baseMessage - The base message to format
      * @returns {string} - The formatted message with hierarchy breadcrumb
      */
-    private formatHierarchicalMessage(baseMessage: string): string {
+    protected formatHierarchicalMessage(baseMessage: string): string {
         if (this._depth > 0) {
             // Build breadcrumb from agent hierarchy (skip root agent)
             const breadcrumb = this._agentHierarchy
@@ -5611,12 +5967,15 @@ The context is now within limits. Please retry your request with the recovered c
      * - Nested sub-agent step 3: buildHierarchicalStep(3, [2, 1]) => "2.1.3"
      * - Deep nesting: buildHierarchicalStep(5, [1, 2, 3, 4]) => "1.2.3.4.5"
      *
+     * Exposed as `protected` so driver sub-classes can emit step labels that
+     * match the framework's `2.1.3` nesting convention.
+     *
      * @param currentStep - Current agent's step number (1-based)
      * @param parentSteps - Array of parent step counts from root to immediate parent
      * @returns Formatted hierarchical step string, or undefined if currentStep is undefined/null
-     * @private
+     * @protected
      */
-    private buildHierarchicalStep(currentStep: number | undefined, parentSteps: number[]): string | undefined {
+    protected buildHierarchicalStep(currentStep: number | undefined, parentSteps: number[]): string | undefined {
         if (currentStep == null) return undefined;
 
         if (parentSteps.length === 0) {
@@ -5943,10 +6302,9 @@ The context is now within limits. Please retry your request with the recovered c
                 });
             } : undefined;
             
-            // Add callback to link PromptRun ID immediately when created
             promptParams.onPromptRunCreated = async (promptRunId: string) => {
                 stepEntity.TargetLogID = promptRunId;
-                await stepEntity.Save();
+                this.queueStepSave(stepEntity);
             };
             
             // Execute the prompt
@@ -6112,6 +6470,15 @@ The context is now within limits. Please retry your request with the recovered c
                 this.injectArtifactToolResultsMessage(params, toolResults);
             } else if (this._artifactToolManager.HasArtifacts()) {
                 this.logStatus(`[ArtifactTools] LLM did not use artifact tools this turn (artifacts available but not accessed)`, true, params);
+            }
+
+            // Execute a tool pipeline if provided (zero turn cost — processed inline). Each step's
+            // output is threaded into the next server-side; only the final step's output returns to
+            // the LLM, so intermediate payloads never enter the context window.
+            if (initialNextStep.pipeline?.steps?.length) {
+                this.logStatus(`[Pipeline] LLM requested a ${initialNextStep.pipeline.steps.length}-stage pipeline: ${(initialNextStep.pipeline.steps as PipelineStage[]).map(s => (s.tool as string) ?? Object.keys(s)[0]).join(' | ')}`, true, params);
+                const pipelineResult = await this.executePipelineAsStep(initialNextStep.pipeline, params);
+                this.injectPipelineResultMessage(params, pipelineResult);
             }
 
             // now that we have processed the payload, we can process the next step which does validation and changes the next step if
@@ -6732,66 +7099,569 @@ The context is now within limits. Please retry your request with the recovered c
      */
     private async processSubAgentStep<SC = any, SR = any>(
         params: ExecuteAgentParams<SC>,
-        previousDecision?: BaseAgentNextStep<SR, SC>,
+        previousDecision: BaseAgentNextStep<SR, SC>,
         parentStepId?: string,
-        subAgentPayloadOverride?: any,
+        subAgentPayloadOverride?: unknown,
         stepCount: number = 0
     ): Promise<BaseAgentNextStep<SR, SC>> {
-        const subAgentRequest = previousDecision.subAgent as AgentSubAgentRequest<SC>;
-        const name = subAgentRequest?.name;
+        // Multiple sub-agents → parallel fan-out
+        if (previousDecision.subAgents && previousDecision.subAgents.length > 0) {
+            return await this.executeParallelSubAgents<SC, SR>(
+                params,
+                previousDecision.subAgents,
+                previousDecision,
+                parentStepId,
+                subAgentPayloadOverride,
+                stepCount
+            );
+        }
 
+        // Single sub-agent path. Use the helper so callers that populated `subAgents`
+        // with a single entry (instead of `subAgent`) still resolve correctly.
+        const requested = this.getRequestedSubAgents<SR, SC>(previousDecision);
+        const subAgentRequest = (requested[0] ?? previousDecision.subAgent) as AgentSubAgentRequest<SC>;
+        const name = subAgentRequest?.name;
         if (!name) {
             return {
                 step: 'Failed',
                 terminate: false,
                 errorMessage: 'Sub-agent name is required',
-                previousPayload: previousDecision?.newPayload,
-                newPayload: previousDecision?.newPayload
+                previousPayload: previousDecision.newPayload,
+                newPayload: previousDecision.newPayload
             };
         }
 
-        // Find the sub-agent - check both child and related agents
-        const childAgents = AIEngine.Instance.Agents.filter(a =>
-            UUIDsEqual(a.ParentID, params.agent.ID) &&
-            a.Status === 'Active'
-        );
-        const childAgent = childAgents.find(a => a.Name.trim().toLowerCase() === name.trim().toLowerCase());
-
-        if (childAgent) {
-            // This is a child agent - use direct payload coupling
-            return await this.executeChildSubAgentStep<SC, SR>(params, previousDecision, parentStepId, subAgentPayloadOverride, stepCount);
-        }
-
-        // Check for related agent
-        const activeRelationships = AIEngine.Instance.AgentRelationships.filter(ar =>
-            UUIDsEqual(ar.AgentID, params.agent.ID) &&
-            ar.Status === 'Active'
-        );
-
-        for (const relationship of activeRelationships) {
-            const relatedAgent = AIEngine.Instance.Agents.find(a =>
-                UUIDsEqual(a.ID, relationship.SubAgentID) &&
-                a.Status === 'Active'
+        const resolved = this.resolveSubAgentByName(params, name);
+        if (resolved?.relationship) {
+            return await this.executeRelatedSubAgentStep<SC, SR>(
+                params,
+                previousDecision,
+                resolved.subAgentEntity,
+                resolved.relationship,
+                parentStepId,
+                subAgentPayloadOverride as SR | undefined,
+                stepCount
             );
-
-            if (relatedAgent && relatedAgent.Name.trim().toLowerCase() === name.trim().toLowerCase()) {
-                // This is a related agent - use message-based coupling
-                return await this.executeRelatedSubAgentStep<SC, SR>(params, previousDecision, relatedAgent, relationship, parentStepId, subAgentPayloadOverride, stepCount);
-            }
+        }
+        if (resolved) {
+            return await this.executeChildSubAgentStep<SC, SR>(
+                params,
+                previousDecision,
+                parentStepId,
+                subAgentPayloadOverride,
+                stepCount
+            );
         }
 
-        // Sub-agent not found
         this.logError(`Sub-agent '${name}' not found or not active for agent '${params.agent.Name}'`, {
             agent: params.agent,
             category: 'SubAgentExecution'
         });
-
         return {
             step: 'Retry',
             terminate: false,
             errorMessage: `Sub-agent '${name}' not found or not active`,
-            previousPayload: previousDecision?.newPayload,
-            newPayload: previousDecision?.newPayload
+            previousPayload: previousDecision.newPayload,
+            newPayload: previousDecision.newPayload
+        };
+    }
+
+    /**
+     * Finds a sub-agent by name, checking child agents (ParentID) first, then
+     * related agents (AgentRelationships). Returns `undefined` when the name
+     * doesn't resolve to an active agent reachable from `params.agent`.
+     *
+     * Used by both the single and parallel sub-agent dispatch paths so name
+     * resolution is consistent and there's one place to fix lookup bugs.
+     *
+     * Exposed as `protected` so driver sub-classes with custom routing logic
+     * still resolve names through the same case-insensitive child-then-related
+     * lookup the framework uses internally.
+     *
+     * @protected
+     */
+    protected resolveSubAgentByName(
+        params: ExecuteAgentParams,
+        name: string
+    ): { subAgentEntity: MJAIAgentEntityExtended; relationship?: MJAIAgentRelationshipEntity } | undefined {
+        const normalized = name.trim().toLowerCase();
+        const childAgent = AIEngine.Instance.Agents.find(a =>
+            UUIDsEqual(a.ParentID, params.agent.ID) &&
+            a.Status === 'Active' &&
+            a.Name.trim().toLowerCase() === normalized
+        );
+        if (childAgent) {
+            return { subAgentEntity: childAgent };
+        }
+        const activeRelationships = AIEngine.Instance.AgentRelationships.filter(ar =>
+            UUIDsEqual(ar.AgentID, params.agent.ID) && ar.Status === 'Active'
+        );
+        for (const rel of activeRelationships) {
+            const relatedAgent = AIEngine.Instance.Agents.find(a =>
+                UUIDsEqual(a.ID, rel.SubAgentID) &&
+                a.Status === 'Active' &&
+                a.Name.trim().toLowerCase() === normalized
+            );
+            if (relatedAgent) {
+                return { subAgentEntity: relatedAgent, relationship: rel };
+            }
+        }
+        return undefined;
+    }
+
+    /**
+     * Best-effort deep clone for sub-agent payloads. We need this so two parallel
+     * sub-agents can each receive their own working copy — without it, mutations
+     * by one in-flight sub-agent would race the others' reads.
+     *
+     * Uses `structuredClone` (Node 17+) where available; falls back to a JSON
+     * round-trip for environments without it. Returns the original value on
+     * non-cloneable inputs.
+     *
+     * **JSON fallback caveats** — the round-trip is *not* shape-preserving:
+     *   - `Date` → ISO string
+     *   - `Map`, `Set`, `RegExp`, typed arrays → `{}`
+     *   - `undefined` values and function-valued properties → dropped
+     *   - `BigInt` → throws (caught by the outer try/catch, returns original)
+     *   - circular refs → throws (returns original)
+     * If payloads ever carry those shapes, behavior diverges between the
+     * structuredClone path (Node 17+) and the JSON path. Keep sub-agent
+     * payloads to plain JSON-safe shapes to avoid this skew.
+     *
+     * Exposed as `protected` so driver sub-classes performing their own parallel
+     * dispatch get the same payload-isolation guarantee.
+     *
+     * @protected
+     */
+    protected cloneSubAgentPayload<T>(payload: T): T {
+        if (payload === null || payload === undefined) return payload;
+        if (typeof payload !== 'object') return payload;
+        try {
+            if (typeof globalThis.structuredClone === 'function') {
+                return globalThis.structuredClone(payload);
+            }
+            return JSON.parse(JSON.stringify(payload)) as T;
+        } catch {
+            return payload;
+        }
+    }
+
+    /**
+     * Pre-flight for one parallel sub-agent: resolve the entity, push the
+     * delegation message, emit progress. Runs synchronously (no awaits) so the
+     * conversation transcript order matches the `subAgents` array's source order
+     * regardless of which dispatch races to the front.
+     *
+     * Returns `undefined` (and pushes a sentinel message) when the sub-agent
+     * can't be resolved — the dispatch loop later records this as a failed
+     * execution rather than throwing inside `Promise.all`.
+     *
+     * @private
+     */
+    private prepareParallelSubAgentDispatch<SC>(
+        params: ExecuteAgentParams<SC>,
+        request: AgentSubAgentRequest<SC>,
+        stepCount: number
+    ): ParallelSubAgentDispatch | undefined {
+        const resolved = this.resolveSubAgentByName(params, request.name);
+        if (!resolved) {
+            this.logError(`Sub-agent '${request.name}' not found or not active for agent '${params.agent.Name}'`, {
+                agent: params.agent,
+                category: 'SubAgentExecution'
+            });
+            return undefined;
+        }
+        const { subAgentEntity, relationship } = resolved;
+
+        params.onProgress?.({
+            step: 'subagent_execution',
+            message: this.formatHierarchicalMessage(`Delegating to parallel sub-agent ${request.name}`),
+            metadata: {
+                agentName: params.agent.Name,
+                subAgentName: request.name,
+                reason: request.message,
+                relationshipType: relationship ? 'related' : 'child',
+                stepCount: stepCount + 1,
+                hierarchicalStep: this.buildHierarchicalStep(stepCount + 1, this._parentStepCounts)
+            }
+        });
+        params.conversationMessages.push({
+            role: 'assistant',
+            content: `I'm delegating this task to the parallel sub-agent "${request.name}".\n\nReason: ${request.message}`
+        });
+
+        return { request: request as AgentSubAgentRequest<unknown>, subAgentEntity, relationship };
+    }
+
+    /**
+     * Computes the per-sub-agent input payload + context message based on whether
+     * this is a child (PayloadScope / paths) or related (input/output mapping)
+     * sub-agent. The parent payload is deep-cloned for child agents so two
+     * parallel sub-agents can't see each other's in-flight mutations.
+     *
+     * @private
+     */
+    private async buildSubAgentInputs<SC, SR>(
+        params: ExecuteAgentParams<SC>,
+        dispatch: ParallelSubAgentDispatch,
+        previousDecision: BaseAgentNextStep<SR, SC>,
+        subAgentPayloadOverride: unknown
+    ): Promise<{ initialPayload: unknown; contextMessage: ChatMessage | null; upstreamPaths: string[] }> {
+        const { subAgentEntity, relationship, request } = dispatch;
+        const parentPayload = previousDecision.newPayload;
+
+        if (relationship) {
+            // Related agent path — input/output mapping handles the structural transform.
+            let initialPayload: unknown = subAgentPayloadOverride;
+            if (!initialPayload && relationship.SubAgentInputMapping) {
+                initialPayload = this.applySubAgentInputMapping(
+                    parentPayload as unknown as Record<string, unknown>,
+                    relationship.SubAgentInputMapping
+                );
+            }
+            const contextPaths = this.parseSubAgentContextPaths(relationship, request.name);
+            const contextMessage = this.prepareRelatedSubAgentContextMessage(
+                parentPayload as unknown as Record<string, unknown>,
+                contextPaths,
+                params
+            );
+            return { initialPayload, contextMessage, upstreamPaths: [] };
+        }
+
+        // Child agent path — scoping + downstream/upstream paths, with deep clone
+        // so siblings can't mutate each other's input.
+        const { downstreamPaths, upstreamPaths } = this.computeUpstreamDownstreamPaths(params, subAgentEntity, request);
+        let initialPayload: unknown = subAgentPayloadOverride;
+        if (!initialPayload) {
+            initialPayload = await this.computeChildSubAgentPayload(
+                params,
+                subAgentEntity,
+                downstreamPaths,
+                request as AgentSubAgentRequest<SC>,
+                previousDecision
+            );
+        }
+        return { initialPayload: this.cloneSubAgentPayload(initialPayload), contextMessage: null, upstreamPaths };
+    }
+
+    /**
+     * Safely parses the `SubAgentContextPaths` JSON field on a relationship.
+     * @private
+     */
+    private parseSubAgentContextPaths(relationship: MJAIAgentRelationshipEntity, subAgentName: string): string[] {
+        if (!relationship.SubAgentContextPaths) return [];
+        try {
+            return JSON.parse(relationship.SubAgentContextPaths);
+        } catch (parseError) {
+            LogError(`Failed to parse SubAgentContextPaths for sub-agent ${subAgentName}: ${(parseError as Error).message}`);
+            return [];
+        }
+    }
+
+    /**
+     * Merges one parallel sub-agent's result back into the running parent payload.
+     * Returns the new payload AND the payload that should be persisted on this
+     * specific sub-agent's step record (the *delta* applied for this sub-agent,
+     * not the cumulative state, so audit logs can distinguish each sibling's
+     * contribution).
+     *
+     * @private
+     */
+    private mergeParallelSubAgentResult<SR>(
+        params: ExecuteAgentParams,
+        execution: ParallelSubAgentExecution<SR>,
+        runningPayload: SR
+    ): { mergedPayload: SR; stepPayloadAtEnd: unknown } {
+        if (!execution.result.success) {
+            // Failures don't contribute to the merged payload, but we still record
+            // the sub-agent's own result on its step for forensic visibility.
+            return { mergedPayload: runningPayload, stepPayloadAtEnd: execution.result.payload };
+        }
+
+        if (execution.relationship) {
+            if (!execution.relationship.SubAgentOutputMapping) {
+                return { mergedPayload: runningPayload, stepPayloadAtEnd: execution.result.payload };
+            }
+            const payloadChange = this.applySubAgentOutputMapping(
+                execution.result.payload as unknown as Record<string, unknown>,
+                runningPayload as unknown as Record<string, unknown>,
+                execution.relationship.SubAgentOutputMapping
+            );
+            if (!payloadChange || !payloadChange.updateElements) {
+                return { mergedPayload: runningPayload, stepPayloadAtEnd: execution.result.payload };
+            }
+            const mergeResult = this._payloadManager.applyAgentChangeRequest<SR>(
+                runningPayload,
+                payloadChange as AgentPayloadChangeRequest<SR>,
+                {
+                    validateChanges: true,
+                    logChanges: true,
+                    analyzeChanges: true,
+                    generateDiff: true,
+                    agentName: `${execution.request.name} (related agent mapping)`,
+                    verbose: params.verbose === true || IsVerboseLoggingEnabled()
+                }
+            );
+            return { mergedPayload: mergeResult.result, stepPayloadAtEnd: execution.result.payload };
+        }
+
+        // Child agent merge — reverse-scope then merge along upstream paths.
+        let resultPayloadForMerge = execution.result.payload;
+        if (execution.subAgentEntity.PayloadScope) {
+            resultPayloadForMerge = this._payloadManager.reversePayloadScope(
+                execution.result.payload,
+                execution.subAgentEntity.PayloadScope
+            );
+        }
+        const mergeResult = this._payloadManager.mergeUpstreamPayload(
+            execution.request.name,
+            runningPayload,
+            resultPayloadForMerge,
+            execution.upstreamPaths,
+            params.verbose === true || IsVerboseLoggingEnabled()
+        );
+        return { mergedPayload: mergeResult.result, stepPayloadAtEnd: resultPayloadForMerge };
+    }
+
+    /**
+     * Builds the aggregated markdown summary of parallel sub-agent results that
+     * gets appended to the parent's conversation as a `user` message — gives the
+     * Loop agent a single deterministic record of what fanned out and what came
+     * back, regardless of completion order.
+     *
+     * @private
+     */
+    private buildParallelSubAgentSummary<SR>(executions: ParallelSubAgentExecution<SR>[]): string {
+        return executions
+            .map(execution => {
+                const statusEmoji = execution.result.success ? '✅' : '❌';
+                const baseInfo =
+                    `${statusEmoji} **Sub-Agent: ${execution.request.name}**\n` +
+                    `* Message: "${execution.request.message}"\n` +
+                    `* Status: ${execution.result.agentRun?.FinalStep || 'Failed'}`;
+                if (execution.result.agentRun?.ErrorMessage) {
+                    return `${baseInfo}\n* Error: ${execution.result.agentRun.ErrorMessage}`;
+                }
+                return baseInfo;
+            })
+            .join('\n\n---\n\n');
+    }
+
+    /**
+     * Executes multiple sub-agents in parallel (with a concurrency cap) and
+     * merges their output payloads back into the parent sequentially.
+     *
+     * Pipeline:
+     *  1. **Synchronously** prepare each dispatch (resolve entity, push delegation
+     *     message, emit progress) so conversation order is deterministic.
+     *  2. Create step entities and run sub-agents with bounded concurrency.
+     *  3. Merge each result into the parent payload sequentially in source order.
+     *  4. Finalize each step entity with its own contribution recorded.
+     *  5. Append an aggregated `user` summary message to the parent conversation.
+     *
+     * Termination semantics: matches the single sub-agent path — if any
+     * dispatched child requested `terminateAfter: true`, the parent terminates
+     * regardless of whether that child succeeded. The parent's reported step is
+     * `Failed` when any child failed, `Success` when terminating cleanly, and
+     * `Retry` otherwise.
+     *
+     * @private
+     */
+    /**
+     * Worker for one parallel sub-agent dispatch: creates the step entity, builds
+     * the (isolated) input payload, and invokes `ExecuteSubAgent`. Returns
+     * `undefined` for an empty dispatch slot (unresolved sub-agent name) so the
+     * caller can record a synthetic failure in source order.
+     *
+     * @private
+     */
+    private async runSingleParallelSubAgent<SC, SR>(
+        params: ExecuteAgentParams<SC>,
+        dispatch: ParallelSubAgentDispatch | undefined,
+        previousDecision: BaseAgentNextStep<SR, SC>,
+        currentPayload: SR,
+        parentStepId: string | undefined,
+        subAgentPayloadOverride: unknown,
+        stepCount: number
+    ): Promise<ParallelSubAgentExecution<SR> | undefined> {
+        if (!dispatch) return undefined;
+        const { request, subAgentEntity, relationship } = dispatch;
+        const stepEntity = await this.createStepEntity({
+            stepType: 'Sub-Agent',
+            stepName: `Execute Parallel Sub-Agent: ${request.name}`,
+            contextUser: params.contextUser,
+            targetId: subAgentEntity.ID,
+            inputData: {
+                agentName: params.agent.Name,
+                subAgentName: request.name,
+                message: request.message,
+                terminateAfter: request.terminateAfter,
+                conversationMessages: params.conversationMessages,
+                parentAgentHierarchy: this._agentHierarchy,
+                relationshipType: relationship ? 'related' : 'child'
+            },
+            payloadAtStart: currentPayload,
+            parentId: parentStepId
+        });
+        this.incrementExecutionCount(subAgentEntity.ID);
+
+        const { initialPayload, contextMessage, upstreamPaths } = await this.buildSubAgentInputs(
+            params, dispatch, previousDecision, subAgentPayloadOverride
+        );
+        const result = await this.ExecuteSubAgent(
+            params,
+            request as AgentSubAgentRequest<SC>,
+            subAgentEntity,
+            stepEntity,
+            initialPayload as SR,
+            contextMessage,
+            stepCount
+        );
+        return { request, result, subAgentEntity, relationship, stepEntity, upstreamPaths };
+    }
+
+    /**
+     * Builds a synthetic execution record for an unresolved sub-agent so we can
+     * keep source-order alignment between `subAgentRequests` and `executions`
+     * without throwing inside `Promise.all`.
+     *
+     * @private
+     */
+    private synthesizeUnresolvedSubAgentExecution<SR>(
+        request: AgentSubAgentRequest<unknown>,
+        runningPayload: SR
+    ): ParallelSubAgentExecution<SR> {
+        return {
+            request,
+            result: {
+                success: false,
+                payload: runningPayload,
+                agentRun: {
+                    ErrorMessage: `Sub-agent '${request.name}' not found or not active`,
+                    FinalStep: 'Failed'
+                } as MJAIAgentRunEntityExtended
+            } as ExecuteAgentResult<SR>,
+            subAgentEntity: { ID: '', Name: request.name } as MJAIAgentEntityExtended,
+            upstreamPaths: []
+        };
+    }
+
+    /**
+     * Sequentially merges each sub-agent's result into the parent payload and
+     * finalizes its step entity with its own contribution recorded.
+     *
+     * @private
+     */
+    private async mergeParallelExecutionsIntoParent<SC, SR>(
+        params: ExecuteAgentParams<SC>,
+        subAgentRequests: AgentSubAgentRequest<SC>[],
+        executions: Array<ParallelSubAgentExecution<SR> | undefined>,
+        startingPayload: SR
+    ): Promise<{ mergedPayload: SR; anyFailure: boolean; allExecutions: ParallelSubAgentExecution<SR>[] }> {
+        let mergedPayload = startingPayload;
+        let anyFailure = false;
+        const allExecutions: ParallelSubAgentExecution<SR>[] = [];
+        for (let idx = 0; idx < subAgentRequests.length; idx++) {
+            const execution = executions[idx];
+            if (!execution) {
+                anyFailure = true;
+                allExecutions.push(this.synthesizeUnresolvedSubAgentExecution(
+                    subAgentRequests[idx] as AgentSubAgentRequest<unknown>,
+                    mergedPayload
+                ));
+                continue;
+            }
+            if (!execution.result.success) anyFailure = true;
+            if (execution.result.mediaOutputs?.length) this._mediaOutputs.push(...execution.result.mediaOutputs);
+            if (execution.result.fileOutputs?.length) this._fileOutputs.push(...execution.result.fileOutputs);
+
+            const { mergedPayload: newMerged, stepPayloadAtEnd } = this.mergeParallelSubAgentResult(
+                params, execution, mergedPayload
+            );
+            mergedPayload = newMerged;
+            allExecutions.push(execution);
+            await this.recordParallelStepCompletion(execution, stepPayloadAtEnd);
+        }
+        return { mergedPayload, anyFailure, allExecutions };
+    }
+
+    /**
+     * Persists per-sibling step state (`PayloadAtEnd` is THIS sub-agent's
+     * contribution, not the cumulative parent state) and finalizes its step
+     * entity.
+     *
+     * @private
+     */
+    private async recordParallelStepCompletion<SR>(
+        execution: ParallelSubAgentExecution<SR>,
+        stepPayloadAtEnd: unknown
+    ): Promise<void> {
+        if (!execution.stepEntity) return;
+        execution.stepEntity.PayloadAtEnd = this.serializePayloadAtEnd(stepPayloadAtEnd);
+        await this.finalizeStepEntity(
+            execution.stepEntity,
+            execution.result.success,
+            execution.result.agentRun?.ErrorMessage,
+            {
+                subAgentResult: {
+                    success: execution.result.success,
+                    finalStep: execution.result.agentRun?.FinalStep,
+                    errorMessage: execution.result.agentRun?.ErrorMessage,
+                    stepCount: execution.result.agentRun?.Steps?.length || 0,
+                },
+                shouldTerminate: execution.request.terminateAfter === true,
+                nextStep: execution.request.terminateAfter === true ? 'success' : 'retry'
+            }
+        );
+    }
+
+    private async executeParallelSubAgents<SC = any, SR = any>(
+        params: ExecuteAgentParams<SC>,
+        subAgentRequests: AgentSubAgentRequest<SC>[],
+        previousDecision: BaseAgentNextStep<SR, SC>,
+        parentStepId?: string,
+        subAgentPayloadOverride?: unknown,
+        stepCount: number = 0
+    ): Promise<BaseAgentNextStep<SR, SC>> {
+        const currentPayload = previousDecision.newPayload;
+
+        // Synchronous pre-flight — order-stable transcript + progress events.
+        const dispatches = subAgentRequests.map(req =>
+            this.prepareParallelSubAgentDispatch(params, req, stepCount)
+        );
+
+        // Bounded parallel dispatch.
+        const executions = await this.mapWithConcurrency(
+            dispatches,
+            PARALLEL_SUBAGENT_CONCURRENCY_LIMIT,
+            (dispatch) => this.runSingleParallelSubAgent<SC, SR>(
+                params, dispatch, previousDecision, currentPayload, parentStepId, subAgentPayloadOverride, stepCount
+            )
+        );
+
+        // Sequential merge + per-sibling step finalization.
+        const { mergedPayload, anyFailure, allExecutions } = await this.mergeParallelExecutionsIntoParent(
+            params, subAgentRequests, executions, currentPayload
+        );
+
+        // Aggregated summary appended to the parent transcript.
+        params.conversationMessages.push({
+            role: 'user',
+            content: `Parallel Sub-Agents Completed:\n\n${this.buildParallelSubAgentSummary(allExecutions)}`
+        });
+
+        // Termination semantics: matches the single sub-agent path —
+        // `terminateAfter` triggers parent termination regardless of the child's
+        // success/failure. The parent's step reflects whether any child failed:
+        // Failed if any did, Success if terminating cleanly, otherwise Retry.
+        const shouldTerminateParent = allExecutions.some(e =>
+            e.request.terminateAfter === true
+        );
+        return {
+            step: anyFailure ? 'Failed' : (shouldTerminateParent ? 'Success' : 'Retry'),
+            terminate: shouldTerminateParent,
+            newPayload: mergedPayload,
+            previousPayload: previousDecision.newPayload
         };
     }
 
@@ -7494,7 +8364,7 @@ The context is now within limits. Please retry your request with the recovered c
                     // Update step entity with ActionExecutionLog ID if available
                     if (actionResult.LogEntry?.ID) {
                         stepEntity.TargetLogID = actionResult.LogEntry.ID;
-                        await stepEntity.Save();
+                        this.queueStepSave(stepEntity);
                     }
                     
                     // Prepare output data with action result
@@ -9106,6 +9976,8 @@ The context is now within limits. Please retry your request with the recovered c
             this._agentRun.TotalTokensUsed = tokenStats.totalTokens;
             this._agentRun.TotalPromptTokensUsed = tokenStats.promptTokens;
             this._agentRun.TotalCompletionTokensUsed = tokenStats.completionTokens;
+            this._agentRun.TotalCacheReadTokensUsed = tokenStats.cacheReadTokens;
+            this._agentRun.TotalCacheWriteTokensUsed = tokenStats.cacheWriteTokens;
             this._agentRun.TotalCost = tokenStats.totalCost;
             
             await this._agentRun.Save();
@@ -9136,6 +10008,8 @@ The context is now within limits. Please retry your request with the recovered c
             this._agentRun.TotalTokensUsed = tokenStats.totalTokens;
             this._agentRun.TotalPromptTokensUsed = tokenStats.promptTokens;
             this._agentRun.TotalCompletionTokensUsed = tokenStats.completionTokens;
+            this._agentRun.TotalCacheReadTokensUsed = tokenStats.cacheReadTokens;
+            this._agentRun.TotalCacheWriteTokensUsed = tokenStats.cacheWriteTokens;
             this._agentRun.TotalCost = tokenStats.totalCost;
             
             await this._agentRun.Save();
@@ -9153,6 +10027,30 @@ The context is now within limits. Please retry your request with the recovered c
      * @private
      */
     private async finalizeAgentRun<P>(finalStep: BaseAgentNextStep, payload?: P, contextUser?: UserInfo): Promise<ExecuteAgentResult<P>> {
+        // Await every pending step save (success OR failure) and accumulate diagnostics.
+        // We use allSettled so a single failure doesn't shadow the rest, and we drain
+        // both queues afterwards so an instance reused for another run doesn't leak
+        // settled promises.
+        const pending = this._pendingSaves;
+        this._pendingSaves = [];
+        this._stepSavePromises.clear();
+
+        if (pending.length > 0) {
+            const settled = await Promise.allSettled(pending);
+            const rejections = settled.filter(s => s.status === 'rejected') as PromiseRejectedResult[];
+            const falses = settled.filter(s => s.status === 'fulfilled' && s.value === false).length;
+            for (const r of rejections) {
+                LogError(`Pending step save rejected: ${r.reason instanceof Error ? r.reason.message : String(r.reason)}`);
+            }
+            const totalFailures = rejections.length + falses;
+            if (totalFailures > 0 && this._agentRun) {
+                const note = `${totalFailures} step record save(s) failed during this run; see logs for details.`;
+                this._agentRun.ErrorMessage = this._agentRun.ErrorMessage
+                    ? `${this._agentRun.ErrorMessage}\n${note}`
+                    : note;
+            }
+        }
+
         // Only resolve media placeholders for ROOT agents (depth === 0)
         // Sub-agents keep placeholders intact so parent agents don't get huge base64 in their context
         // The root agent resolves all placeholders when returning the final result to the UI
@@ -9166,13 +10064,6 @@ The context is now within limits. Please retry your request with the recovered c
         const resolvedActionableCommands = (finalStep.actionableCommands && isRootAgent)
             ? this.resolveMediaPlaceholdersInPayload(finalStep.actionableCommands)
             : finalStep.actionableCommands;
-
-        // For root agents: process message for media placeholders
-        // This promotes referenced media (sets persist=true) and strips media HTML tags
-        // so images display via ConversationDetailAttachment instead of embedded in message
-        const processedMessage = (finalStep.message && isRootAgent)
-            ? this.processMessageMediaPlaceholders(finalStep.message)
-            : finalStep.message;
 
         if (this._agentRun) {
             this._agentRun.CompletedAt = new Date();
@@ -9199,7 +10090,7 @@ The context is now within limits. Please retry your request with the recovered c
 
             this._agentRun.Result = resolvedPayload ? JSON.stringify(resolvedPayload) : null;
             this._agentRun.FinalStep = finalStep.step;
-            this._agentRun.Message = processedMessage;
+            this._agentRun.Message = finalStep.message;
 
             // Set the FinalPayloadObject - this will automatically stringify for the DB
             this._agentRun.FinalPayloadObject = resolvedPayload;
@@ -9210,6 +10101,8 @@ The context is now within limits. Please retry your request with the recovered c
             this._agentRun.TotalTokensUsed = tokenStats.totalTokens;
             this._agentRun.TotalPromptTokensUsed = tokenStats.promptTokens;
             this._agentRun.TotalCompletionTokensUsed = tokenStats.completionTokens;
+            this._agentRun.TotalCacheReadTokensUsed = tokenStats.cacheReadTokens;
+            this._agentRun.TotalCacheWriteTokensUsed = tokenStats.cacheWriteTokens;
             this._agentRun.TotalCost = tokenStats.totalCost;
             
             const ok = await this._agentRun.Save();
@@ -9223,10 +10116,8 @@ The context is now within limits. Please retry your request with the recovered c
             this.promoteMediaOutputs(finalStep.promoteMediaOutputs);
         }
 
-        // Return unified media outputs array which includes:
-        // - Explicitly promoted media (persist defaults to true)
-        // - Intercepted binary with refIds (persist=false unless placeholder was resolved)
-        // Sub-agents pass their full mediaOutputs to parent for merging and placeholder resolution.
+        // Return unified media outputs — all items are persisted by AgentRunner.
+        // Sub-agents pass their mediaOutputs to parent for merging and placeholder resolution.
         return {
             success: finalStep.step === 'Success' || finalStep.step === 'Chat',
             payload: resolvedPayload,
@@ -9251,32 +10142,38 @@ The context is now within limits. Please retry your request with the recovered c
      * @returns Token statistics including totals and costs
      * @private
      */
-    private calculateTokenStats(): { totalTokens: number; promptTokens: number; completionTokens: number; totalCost: number } {
+    private calculateTokenStats(): { totalTokens: number; promptTokens: number; completionTokens: number; cacheReadTokens: number; cacheWriteTokens: number; totalCost: number } {
         let totalTokens = 0;
         let promptTokens = 0;
         let completionTokens = 0;
+        let cacheReadTokens = 0;
+        let cacheWriteTokens = 0;
         let totalCost = 0;
 
         // Iterate through the agent run's steps to sum up tokens
         if (this._agentRun?.Steps) {
             for (const step of this._agentRun.Steps) {
                 if (step.StepType === 'Prompt' && step.PromptRun) {
-                    // Add tokens from prompt runs
+                    // Add tokens from prompt runs (rollup fields include any nested child prompt runs)
                     totalTokens += step.PromptRun.TokensUsedRollup || 0;
-                    promptTokens += step.PromptRun.TokensPromptRollup || 0;  
+                    promptTokens += step.PromptRun.TokensPromptRollup || 0;
                     completionTokens += step.PromptRun.TokensCompletionRollup || 0;
+                    cacheReadTokens += step.PromptRun.TokensCacheReadRollup || 0;
+                    cacheWriteTokens += step.PromptRun.TokensCacheWriteRollup || 0;
                     totalCost += step.PromptRun.TotalCost || 0;
                 } else if (step.StepType === 'Sub-Agent' && step.SubAgentRun) {
                     // Add tokens from sub-agent runs (these should already be calculated recursively)
                     totalTokens += step.SubAgentRun.TotalTokensUsed || 0;
                     promptTokens += step.SubAgentRun.TotalPromptTokensUsed || 0;
                     completionTokens += step.SubAgentRun.TotalCompletionTokensUsed || 0;
+                    cacheReadTokens += step.SubAgentRun.TotalCacheReadTokensUsed || 0;
+                    cacheWriteTokens += step.SubAgentRun.TotalCacheWriteTokensUsed || 0;
                     totalCost += step.SubAgentRun.TotalCost || 0;
                 }
             }
         }
 
-        return { totalTokens, promptTokens, completionTokens, totalCost };
+        return { totalTokens, promptTokens, completionTokens, cacheReadTokens, cacheWriteTokens, totalCost };
     }
 
     /**
@@ -9303,23 +10200,27 @@ The context is now within limits. Please retry your request with the recovered c
 
     /**
      * Increments the execution count for an item (action or sub-agent).
-     * 
+     *
+     * Exposed as `protected` so driver sub-classes performing custom dispatch
+     * bump the same per-item counter the framework checks against execution
+     * guardrails — without this, custom dispatch silently bypasses limits.
+     *
      * @param itemId - The item ID to increment (action ID or sub-agent ID)
-     * @private
+     * @protected
      */
-    private incrementExecutionCount(itemId: string): void {
+    protected incrementExecutionCount(itemId: string): void {
         const currentCount = this._executionCounts.get(itemId) || 0;
         this._executionCounts.set(itemId, currentCount + 1);
     }
 
     /**
      * Gets the execution count for an item (action or sub-agent).
-     * 
+     *
      * @param itemId - The item ID to get count for
      * @returns The execution count (0 if never executed)
-     * @private
+     * @protected
      */
-    private getExecutionCount(itemId: string): number {
+    protected getExecutionCount(itemId: string): number {
         return this._executionCounts.get(itemId) || 0;
     }
 

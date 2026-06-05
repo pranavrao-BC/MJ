@@ -1,7 +1,7 @@
 {
   "name": "@memberjunction/ai-deepgram",
   "type": "module",
-  "version": "5.36.0",
+  "version": "5.39.0",
   "description": "MemberJunction Wrapper for Deepgram Speech-to-Text (Streaming Nova-3)",
   "main": "dist/index.js",
   "types": "dist/index.d.ts",
@@ -24,8 +24,8 @@
     "typescript": "^5.9.3"
   },
   "dependencies": {
-    "@memberjunction/ai": "5.36.0",
-    "@memberjunction/global": "5.36.0",
+    "@memberjunction/ai": "5.39.0",
+    "@memberjunction/global": "5.39.0",
     "ws": "^8.19.0"
   },
   "repository": {
