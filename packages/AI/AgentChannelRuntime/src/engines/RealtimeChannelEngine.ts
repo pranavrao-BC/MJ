@@ -18,6 +18,7 @@
  * `BaseAgent`. Both are documented follow-ups — the demo target is a live,
  * agent-identified S2S conversation.
  */
+import { randomUUID } from 'crypto';
 import { LogError, LogStatus, Metadata, RunView, UserInfo } from '@memberjunction/core';
 import { MJGlobal, RegisterClass } from '@memberjunction/global';
 import { MJAIModelEntity } from '@memberjunction/core-entities';
@@ -36,6 +37,7 @@ import type { ExecuteAgentParams, MJAIAgentEntityExtended } from '@memberjunctio
 import { BaseChannelEngine, ChannelRunContext, ChannelStopReason } from '../BaseChannelEngine';
 import { VoiceRealtimeConfig } from '../types/channel-config';
 import type { ControlEvent } from '../frames/frame-bus';
+import type { DrawOp } from '../types/transcript-event';
 import { InterruptReason } from '../interrupt/InterruptChannel';
 
 /**
@@ -64,6 +66,110 @@ const DELEGATE_TOOL: ToolDefinition = {
             },
         },
         required: ['agent_name', 'task'],
+    },
+};
+
+/**
+ * The tool that lets the realtime model DRAW on the shared whiteboard the
+ * student is looking at — the visual counterpart to talking. Each call carries
+ * an `ops` array; the engine fans each op out as a `DrawOpBlockEvent` on the
+ * transcript path, and the widget renders it onto the canvas live.
+ *
+ * Coordinates are NORMALIZED 0..1 (origin top-left) so the same op renders
+ * correctly at any canvas size. The description is deliberately teaching-
+ * oriented so the model uses the whiteboard the way a good tutor would: draw
+ * the diagram, label it, then talk about it.
+ */
+const DRAW_ON_WHITEBOARD_TOOL: ToolDefinition = {
+    Name: 'draw_on_whiteboard',
+    Description:
+        'Draw on the shared whiteboard the student is looking at. Use this whenever a picture ' +
+        'helps you teach: diagrams, geometric shapes, labeled examples, worked solutions, or ' +
+        'sketches. Prefer drawing AND narrating together (e.g. draw a right triangle, then say ' +
+        'what you drew). All coordinates are normalized 0..1 with the origin at the top-left ' +
+        'corner: X grows rightward, Y grows downward, so the center of the board is (0.5, 0.5). ' +
+        'Sizes/widths/font sizes are in pixels at render time. Send several ops in one call to ' +
+        'compose a figure (e.g. a shape plus its labels). Use a "clear" op to wipe the board ' +
+        'before starting a fresh diagram.',
+    ParametersSchema: {
+        type: 'object',
+        properties: {
+            ops: {
+                type: 'array',
+                description: 'Ordered list of drawing operations to apply to the whiteboard.',
+                items: {
+                    type: 'object',
+                    properties: {
+                        Type: {
+                            type: 'string',
+                            enum: ['stroke', 'shape', 'text', 'clear'],
+                            description:
+                                "The kind of op: 'stroke' = freehand path through Points; " +
+                                "'shape' = a primitive (line/rect/ellipse/triangle/arrow) in a " +
+                                "bounding box; 'text' = a text label; 'clear' = erase the whole board.",
+                        },
+                        Points: {
+                            type: 'array',
+                            description:
+                                "For Type='stroke': the ordered points of the freehand path, each " +
+                                'normalized 0..1.',
+                            items: {
+                                type: 'object',
+                                properties: {
+                                    X: { type: 'number', description: 'Horizontal position, 0..1.' },
+                                    Y: { type: 'number', description: 'Vertical position, 0..1.' },
+                                },
+                                required: ['X', 'Y'],
+                            },
+                        },
+                        Shape: {
+                            type: 'string',
+                            enum: ['line', 'rect', 'ellipse', 'triangle', 'arrow'],
+                            description: "For Type='shape': which primitive to draw.",
+                        },
+                        X: {
+                            type: 'number',
+                            description:
+                                "For Type='shape' or 'text': left/anchor X position, normalized 0..1.",
+                        },
+                        Y: {
+                            type: 'number',
+                            description:
+                                "For Type='shape' or 'text': top/anchor Y position, normalized 0..1.",
+                        },
+                        W: {
+                            type: 'number',
+                            description: "For Type='shape': bounding-box width, normalized 0..1.",
+                        },
+                        H: {
+                            type: 'number',
+                            description: "For Type='shape': bounding-box height, normalized 0..1.",
+                        },
+                        Text: {
+                            type: 'string',
+                            description: "For Type='text': the label to render.",
+                        },
+                        Color: {
+                            type: 'string',
+                            description:
+                                'CSS color string (e.g. "#1d4ed8", "red"). Applies to stroke, ' +
+                                'shape, and text ops.',
+                        },
+                        Width: {
+                            type: 'number',
+                            description:
+                                "For Type='stroke' or 'shape': line width in pixels at render time.",
+                        },
+                        FontSize: {
+                            type: 'number',
+                            description: "For Type='text': font size in pixels at render time.",
+                        },
+                    },
+                    required: ['Type'],
+                },
+            },
+        },
+        required: ['ops'],
     },
 };
 
@@ -158,6 +264,9 @@ export class RealtimeChannelEngine extends BaseChannelEngine {
         if (call.Name === 'delegate_to_agent') {
             return this.delegateToAgent(ctx, call);
         }
+        if (call.Name === 'draw_on_whiteboard') {
+            return this.drawOnWhiteboard(ctx, call);
+        }
         ctx.OnTranscript?.({
             Kind: 'tool-call',
             CallID: call.CallID,
@@ -248,6 +357,47 @@ export class RealtimeChannelEngine extends BaseChannelEngine {
         }
     }
 
+    /**
+     * Execute `draw_on_whiteboard`: fan the model's `ops` array out as one
+     * `DrawOpBlockEvent` per op on the transcript path (the widget renders each
+     * onto the shared canvas). Drawing is instant, so unlike `delegate_to_agent`
+     * there's no running→complete pair — we emit a single completed `tool-call`
+     * block for visibility in the text channel, then return.
+     *
+     * Defensive throughout: malformed ops are skipped rather than thrown, so a
+     * single bad op from the model never aborts the whole figure or the session.
+     */
+    private drawOnWhiteboard(ctx: ChannelRunContext, call: ToolCall): ToolResult {
+        const rawOps = call.Arguments['ops'];
+        const ops = Array.isArray(rawOps) ? rawOps : [];
+        let count = 0;
+        for (const raw of ops) {
+            const op = coerceDrawOp(raw);
+            if (!op) {
+                continue;
+            }
+            ctx.OnTranscript?.({
+                Kind: 'draw-op',
+                OpID: randomUUID(),
+                Source: 'agent',
+                Op: op,
+            });
+            count++;
+        }
+        LogStatus(
+            `[ChannelSession ${ctx.SessionID}] realtime-draw ops=${ops.length} drawn=${count}`
+        );
+        ctx.OnTranscript?.({
+            Kind: 'tool-call',
+            CallID: call.CallID,
+            ToolName: call.Name,
+            Label: '✏️ Drew on whiteboard',
+            Status: 'complete',
+            Detail: `${count} shape(s)`,
+        });
+        return { CallID: call.CallID, Result: `drawn ${count} shape(s)` };
+    }
+
     private onInterrupt(session: RealtimeSpeechSession, _reason: InterruptReason): void {
         session.CancelCurrentResponse();
     }
@@ -292,6 +442,12 @@ export class RealtimeChannelEngine extends BaseChannelEngine {
                     ctx.OnTranscript?.({ Kind: 'user', Text: control.Text, IsFinal: true });
                     session.SendText(control.Text);
                 }
+                if (control.Kind === 'user-canvas-snapshot' && control.ImageBase64) {
+                    LogStatus(
+                        `[ChannelSession ${ctx.SessionID}] realtime-send-canvas mediaType='${control.MediaType}' b64Len=${control.ImageBase64.length}`
+                    );
+                    session.SendImage(control.ImageBase64, control.MediaType);
+                }
             }
         } catch (err) {
             if (!this.stopped) {
@@ -317,7 +473,7 @@ export class RealtimeChannelEngine extends BaseChannelEngine {
             SystemPrompt: systemPrompt,
             ModelAPIName: modelApiName,
             ContextUser: ctx.ContextUser,
-            Tools: [DELEGATE_TOOL],
+            Tools: [DELEGATE_TOOL, DRAW_ON_WHITEBOARD_TOOL],
         };
     }
 
@@ -418,4 +574,92 @@ function narrowVoiceRealtimeConfig(ctx: ChannelRunContext): VoiceRealtimeConfig 
 
 function errMsg(err: unknown): string {
     return err instanceof Error ? err.message : String(err);
+}
+
+/** A finite number, defaulting to `fallback` for anything else (NaN, strings, undefined). */
+function num(value: unknown, fallback: number): number {
+    return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
+}
+
+/** A non-empty string, or `undefined`. */
+function str(value: unknown): string | undefined {
+    return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+/**
+ * Defensively coerce one raw op (as the model emitted it) into a typed
+ * `DrawOp`, or `null` if it's not salvageable. We're permissive on detail
+ * (missing color/width get sensible defaults) but strict on structure: a stroke
+ * needs at least one point, a shape needs a valid `Shape`, text needs `Text`.
+ */
+function coerceDrawOp(raw: unknown): DrawOp | null {
+    if (typeof raw !== 'object' || raw === null) {
+        return null;
+    }
+    const op = raw as Record<string, unknown>;
+    switch (op['Type']) {
+        case 'clear':
+            return { Type: 'clear' };
+        case 'stroke':
+            return coerceStroke(op);
+        case 'shape':
+            return coerceShape(op);
+        case 'text':
+            return coerceText(op);
+        default:
+            return null;
+    }
+}
+
+const SHAPE_KINDS = ['line', 'rect', 'ellipse', 'triangle', 'arrow'] as const;
+type ShapeKind = (typeof SHAPE_KINDS)[number];
+
+function coerceStroke(op: Record<string, unknown>): DrawOp | null {
+    const rawPoints = op['Points'];
+    if (!Array.isArray(rawPoints)) {
+        return null;
+    }
+    const points: { X: number; Y: number }[] = [];
+    for (const p of rawPoints) {
+        if (typeof p === 'object' && p !== null) {
+            const pt = p as Record<string, unknown>;
+            points.push({ X: num(pt['X'], 0), Y: num(pt['Y'], 0) });
+        }
+    }
+    if (points.length === 0) {
+        return null;
+    }
+    return { Type: 'stroke', Points: points, Color: str(op['Color']) ?? '#000000', Width: num(op['Width'], 2) };
+}
+
+function coerceShape(op: Record<string, unknown>): DrawOp | null {
+    const shape = op['Shape'];
+    if (typeof shape !== 'string' || !SHAPE_KINDS.includes(shape as ShapeKind)) {
+        return null;
+    }
+    return {
+        Type: 'shape',
+        Shape: shape as ShapeKind,
+        X: num(op['X'], 0),
+        Y: num(op['Y'], 0),
+        W: num(op['W'], 0),
+        H: num(op['H'], 0),
+        Color: str(op['Color']) ?? '#000000',
+        Width: num(op['Width'], 2),
+    };
+}
+
+function coerceText(op: Record<string, unknown>): DrawOp | null {
+    const text = str(op['Text']);
+    if (text === undefined) {
+        return null;
+    }
+    return {
+        Type: 'text',
+        X: num(op['X'], 0),
+        Y: num(op['Y'], 0),
+        Text: text,
+        Color: str(op['Color']) ?? '#000000',
+        FontSize: num(op['FontSize'], 16),
+    };
 }

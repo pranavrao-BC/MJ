@@ -131,6 +131,23 @@ export class TextInputAudioOutputTransport implements ITransportAdapter {
     }
 
     /**
+     * Push a whiteboard snapshot (the student's current canvas) into the inbound
+     * control-event stream as `{ Kind: 'user-canvas-snapshot', ImageBase64,
+     * MediaType }`. The engine forwards it to the realtime session via
+     * `SendImage` so the agent can SEE what the student drew.
+     *
+     * Same gating rationale as `PushUserText`: we do NOT gate on `opened` (the
+     * `AsyncQueue` buffers until the engine starts consuming), but we DO
+     * short-circuit once `closed` — late snapshots after session end are noise.
+     */
+    public PushCanvasSnapshot(imageBase64: string, mediaType: string): void {
+        if (this.closed) {
+            return;
+        }
+        this.controlIn.Push({ Kind: 'user-canvas-snapshot', ImageBase64: imageBase64, MediaType: mediaType });
+    }
+
+    /**
      * Async iterable that yields every frame written via `SendAudioFrame`.
      * External consumers (e.g. MJServer subscription resolvers) drain this
      * to stream agent TTS audio to the client.

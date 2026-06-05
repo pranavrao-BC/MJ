@@ -204,6 +204,29 @@ export class SubmitChannelTextTurnResult {
     ErrorMessage?: string;
 }
 
+@InputType()
+export class SubmitChannelCanvasSnapshotInput {
+    @Field()
+    SessionID!: string;
+
+    /** PNG (or other) image as base64, NO `data:` prefix. */
+    @Field()
+    ImageBase64!: string;
+
+    /** MIME type of the image, e.g. `'image/png'`. */
+    @Field()
+    MediaType!: string;
+}
+
+@ObjectType()
+export class SubmitChannelCanvasSnapshotResult {
+    @Field()
+    OK!: boolean;
+
+    @Field({ nullable: true })
+    ErrorMessage?: string;
+}
+
 /**
  * One outbound audio frame from a `TextInputAudioOutputTransport`, delivered
  * over a GraphQL subscription. The raw `Uint8Array` is base64-encoded for
@@ -295,6 +318,20 @@ export class ChannelTranscriptEventDTO {
     /** Short args/result/error snippet for the block. */
     @Field({ nullable: true })
     Detail?: string;
+
+    // --- draw-op block fields (Kind === 'draw-op') ---
+    /**
+     * The whole `DrawOp` shape (stroke / shape / text / clear). Untyped here —
+     * the widget renders it onto the canvas. See `DrawOpBlockEvent.Op`.
+     */
+    @Field(() => GraphQLJSONObject, { nullable: true })
+    DrawOp?: Record<string, unknown>;
+    /** Draw-op id for dedupe / ordering. */
+    @Field({ nullable: true })
+    OpID?: string;
+    /** Origin of the draw op — always `'agent'` outbound. */
+    @Field({ nullable: true })
+    Source?: string;
 }
 
 /** Internal pubsub payload for transcript events — shape parallels the DTO. */
@@ -310,6 +347,9 @@ export interface ChannelTranscriptPayload {
     Label?: string;
     Status?: string;
     Detail?: string;
+    DrawOp?: Record<string, unknown>;
+    OpID?: string;
+    Source?: string;
 }
 
 // -----------------------------------------------------------------------------
@@ -554,6 +594,49 @@ export class ChannelSessionResolver extends ResolverBase {
     }
 
     /**
+     * Push a whiteboard canvas snapshot into a running
+     * `TextInputAudioOutputTransport`-backed session so the agent can "see"
+     * what the student drew. Mirrors `SubmitChannelTextTurn`: the snapshot
+     * surfaces to the channel engine as a `user-canvas-snapshot` control
+     * event, which the realtime engine forwards to the live model via
+     * `SendImage`.
+     *
+     * Returns `OK:false` (no throw) for:
+     *   - unknown / already-ended SessionID
+     *   - session whose transport is not a `TextInputAudioOutputTransport`
+     */
+    @Mutation(() => SubmitChannelCanvasSnapshotResult)
+    async SubmitChannelCanvasSnapshot(
+        @Arg('input') input: SubmitChannelCanvasSnapshotInput,
+        @Ctx() { userPayload }: AppContext
+    ): Promise<SubmitChannelCanvasSnapshotResult> {
+        const contextUser = this.GetUserFromPayload(userPayload);
+        if (!contextUser) {
+            return { OK: false, ErrorMessage: 'Unable to determine current user' };
+        }
+
+        const session = ChannelSessionRegistry.Instance.Get(input.SessionID);
+        if (!session) {
+            return { OK: false, ErrorMessage: `Session not found: ${input.SessionID}` };
+        }
+
+        const transport = session.Transport;
+        if (!(transport instanceof TextInputAudioOutputTransport)) {
+            return {
+                OK: false,
+                ErrorMessage:
+                    'Session is not a text-input channel — SubmitChannelCanvasSnapshot requires a TextInputAudioOutputTransport.',
+            };
+        }
+
+        transport.PushCanvasSnapshot(input.ImageBase64, input.MediaType);
+        LogStatus(
+            `[ChannelSessionResolver] SubmitChannelCanvasSnapshot sessionID=${input.SessionID} mediaType='${input.MediaType}' bytesBase64=${input.ImageBase64.length}`
+        );
+        return { OK: true };
+    }
+
+    /**
      * Stream transcript events for a channel session. Engines emit user
      * finals, assistant-text deltas (as the streaming JSON parser extracts
      * the `message` field), and a final `agent-response` event carrying
@@ -586,6 +669,9 @@ export class ChannelSessionResolver extends ResolverBase {
             Label: notification.Label,
             Status: notification.Status,
             Detail: notification.Detail,
+            DrawOp: notification.DrawOp,
+            OpID: notification.OpID,
+            Source: notification.Source,
         };
     }
 
@@ -952,6 +1038,12 @@ export class ChannelSessionResolver extends ResolverBase {
             Label: event.Kind === 'tool-call' ? event.Label : undefined,
             Status: event.Kind === 'tool-call' ? event.Status : undefined,
             Detail: event.Kind === 'tool-call' ? event.Detail : undefined,
+            DrawOp:
+                event.Kind === 'draw-op'
+                    ? (event.Op as unknown as Record<string, unknown>)
+                    : undefined,
+            OpID: event.Kind === 'draw-op' ? event.OpID : undefined,
+            Source: event.Kind === 'draw-op' ? event.Source : undefined,
         };
         PubSubManager.Instance.Publish(
             CHANNEL_TRANSCRIPT_TOPIC,

@@ -53,7 +53,8 @@ export type ControlEvent =
     | { Kind: 'session-end'; Reason: string }
     | { Kind: 'participant-joined'; ParticipantID: string }
     | { Kind: 'participant-left'; ParticipantID: string }
-    | { Kind: 'user-text'; Text: string };
+    | { Kind: 'user-text'; Text: string }
+    | { Kind: 'user-canvas-snapshot'; ImageBase64: string; MediaType: string };
 
 /**
  * A tool invocation surfaced to the runtime (routes back through `BaseAgent`

@@ -63,6 +63,33 @@ export interface SubmitTextTurnResult {
     ErrorMessage?: string;
 }
 
+/** Result of `SubmitChannelCanvasSnapshot`. */
+export interface SubmitSnapshotResult {
+    OK: boolean;
+    ErrorMessage?: string;
+}
+
+/**
+ * A single drawing operation, mirroring the runtime/server `DrawOp` shape.
+ * Coordinates are normalized 0..1 (origin top-left) so canvas size is
+ * irrelevant. `Color` is a CSS color string; `Width` / `FontSize` are pixels
+ * at render time.
+ */
+export type VoiceDrawOp =
+    | { Type: 'stroke'; Points: { X: number; Y: number }[]; Color: string; Width: number }
+    | {
+          Type: 'shape';
+          Shape: 'line' | 'rect' | 'ellipse' | 'triangle' | 'arrow';
+          X: number;
+          Y: number;
+          W: number;
+          H: number;
+          Color: string;
+          Width: number;
+      }
+    | { Type: 'text'; X: number; Y: number; Text: string; Color: string; FontSize: number }
+    | { Type: 'clear' };
+
 /** Result of `EndChannelSession`. */
 export interface EndSessionResult {
     OK: boolean;
@@ -78,10 +105,12 @@ export interface EndSessionResult {
  *                       `ActionableCommands` and `ResponseForm`. `Text` is
  *                       the full assembled `message`.
  *  - `error`          — per-turn error; surface in the widget UI.
+ *  - `draw-op`        — a single agent drawing operation for the whiteboard
+ *                       channel; routed to `whiteboard.ApplyDrawOp(DrawOp)`.
  */
 export interface VoiceTranscriptEvent {
     SessionID: string;
-    Kind: 'user' | 'assistant-text' | 'agent-response' | 'tool-call' | 'error';
+    Kind: 'user' | 'assistant-text' | 'agent-response' | 'tool-call' | 'draw-op' | 'error';
     Text?: string;
     IsFinal?: boolean;
     ActionableCommands?: VoiceActionableCommand[];
@@ -92,6 +121,10 @@ export interface VoiceTranscriptEvent {
     Label?: string;
     Status?: string;
     Detail?: string;
+    // draw-op block fields (Kind === 'draw-op')
+    DrawOp?: VoiceDrawOp;
+    OpID?: string;
+    Source?: string;
 }
 
 /**

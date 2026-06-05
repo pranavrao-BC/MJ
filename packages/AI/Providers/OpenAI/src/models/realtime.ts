@@ -71,6 +71,27 @@ class OpenAIRealtimeSession implements RealtimeSpeechSession {
         this.rt.send({ type: 'response.create' });
     }
 
+    public SendImage(imageBase64: string, mediaType: string): void {
+        if (this.closed || imageBase64.length === 0) {
+            return;
+        }
+        // Add the image as a user-message conversation item, then ask for a
+        // response. Mirrors `SendText` — an `input_image` content part (data
+        // URI) instead of `input_text`. (Verified against openai 6.18.0:
+        // `RealtimeConversationItemUserMessage.Content` accepts
+        // `type: 'input_image'` with an `image_url` data URI.)
+        this.rt.send({
+            type: 'conversation.item.create',
+            item: {
+                type: 'message',
+                role: 'user',
+                content: [{ type: 'input_image', image_url: `data:${mediaType};base64,${imageBase64}` }],
+            },
+        });
+        this.rt.send({ type: 'response.create' });
+        console.log(`[OpenAIRealtimeSpeech] realtime-send-image bytes=${imageBase64.length}`);
+    }
+
     public OnAudio(cb: AudioListener): void {
         this.audioCb = cb;
     }

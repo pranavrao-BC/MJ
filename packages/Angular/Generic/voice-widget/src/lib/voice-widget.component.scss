@@ -122,6 +122,73 @@
     flex-shrink: 0;
 }
 
+// ---------------------------------------------------------------------------
+// Channel-toggle chips — Text / Voice / Whiteboard
+// ---------------------------------------------------------------------------
+
+.voice-widget__channel-toggles {
+    display: flex;
+    align-items: center;
+    gap: 6px;
+    flex-shrink: 0;
+}
+
+.voice-widget__channel-chip {
+    display: inline-flex;
+    align-items: center;
+    gap: 6px;
+    padding: 4px 10px;
+    border: 1px solid var(--mj-border-default);
+    border-radius: 999px;
+    background: var(--mj-bg-surface);
+    color: var(--mj-text-secondary);
+    font-size: 0.75rem;
+    font-weight: 500;
+    cursor: pointer;
+    transition: background 0.15s ease, color 0.15s ease, border-color 0.15s ease;
+
+    i {
+        font-size: 0.75rem;
+    }
+
+    &:hover {
+        background: var(--mj-bg-surface-hover);
+        color: var(--mj-text-primary);
+    }
+
+    &--active {
+        background: var(--mj-brand-primary);
+        border-color: var(--mj-brand-primary);
+        color: var(--mj-text-inverse);
+
+        &:hover {
+            background: var(--mj-brand-primary-hover);
+            color: var(--mj-text-inverse);
+        }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Main panel — transcript + whiteboard side by side
+// ---------------------------------------------------------------------------
+
+.voice-widget__main {
+    flex: 1;
+    min-height: 0;
+    display: flex;
+    flex-direction: row;
+    gap: 1px;
+    background: var(--mj-border-subtle); // thin divider showing through the gap
+}
+
+.voice-widget__whiteboard {
+    flex: 1;
+    min-height: 0;
+    min-width: 0;
+    display: block;
+    background: var(--mj-bg-surface);
+}
+
 .voice-widget__icon-btn {
     width: 32px;
     height: 32px;
@@ -185,6 +252,7 @@
 .voice-widget__transcript {
     flex: 1;
     min-height: 0;
+    min-width: 0;
     overflow-y: auto;
     padding: 16px 8px;
     display: flex;

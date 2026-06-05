@@ -26,13 +26,38 @@
  *                       UI and the final assembled `Message` for display.
  *  - `error`          — surface a turn-level error (e.g. agent execution
  *                       failure) without taking down the session.
+ *  - `draw-op`        — a single drawing operation the agent performs on the
+ *                       shared whiteboard. The widget renders it locally onto
+ *                       the canvas. Rides the same transcript path as
+ *                       `tool-call` blocks.
  */
 export type ChannelTranscriptEvent =
     | UserTranscriptEvent
     | AssistantTextEvent
     | AgentResponseEvent
     | ToolCallBlockEvent
+    | DrawOpBlockEvent
     | TranscriptErrorEvent;
+
+/**
+ * A single drawing operation. Coordinates are normalized 0..1 (origin
+ * top-left) so canvas size is irrelevant. `Color` is a CSS color string.
+ * `Width` / `FontSize` are pixels at render time.
+ */
+export type DrawOp =
+    | { Type: 'stroke'; Points: { X: number; Y: number }[]; Color: string; Width: number }
+    | {
+          Type: 'shape';
+          Shape: 'line' | 'rect' | 'ellipse' | 'triangle' | 'arrow';
+          X: number;
+          Y: number;
+          W: number;
+          H: number;
+          Color: string;
+          Width: number;
+      }
+    | { Type: 'text'; X: number; Y: number; Text: string; Color: string; FontSize: number }
+    | { Type: 'clear' };
 
 export interface UserTranscriptEvent {
     Kind: 'user';
@@ -101,6 +126,27 @@ export interface ToolCallBlockEvent {
     Status: 'running' | 'complete' | 'error';
     /** Short args summary (on running) or result/error snippet (on complete/error). */
     Detail?: string;
+}
+
+/**
+ * A drawing "block" — the unit that makes the whiteboard channel *functional*.
+ * Emitted when the agent draws on the shared whiteboard (e.g. a tutoring
+ * diagram), one event per `DrawOp`. The widget renders each op locally onto
+ * the canvas the student is looking at.
+ *
+ * Mirrors `ToolCallBlockEvent` in spirit: it rides the same transcript path
+ * (`ctx.OnTranscript?.({...})`), is correlated by `OpID` for dedupe/ordering,
+ * and `Source` is always `'agent'` (student-drawn strokes are captured locally
+ * and sent back as canvas snapshots, not as transcript events).
+ */
+export interface DrawOpBlockEvent {
+    Kind: 'draw-op';
+    /** Correlation id for dedupe / ordering of drawing ops. */
+    OpID: string;
+    /** Outbound draw ops are always agent-sourced (student renders locally). */
+    Source: 'agent';
+    /** The drawing operation to render. */
+    Op: DrawOp;
 }
 
 export interface TranscriptErrorEvent {

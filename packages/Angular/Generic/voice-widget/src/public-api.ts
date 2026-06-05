@@ -8,3 +8,4 @@
 export * from './lib/voice-widget.component';
 export * from './lib/voice-widget.service';
 export * from './lib/voice-widget.types';
+export * from './lib/whiteboard-channel/whiteboard-channel.component';

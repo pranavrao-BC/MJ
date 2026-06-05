@@ -5,6 +5,7 @@ import { GraphQLDataProvider } from '@memberjunction/graphql-dataprovider';
 import {
     EndSessionResult,
     StartSessionResult,
+    SubmitSnapshotResult,
     SubmitTextTurnResult,
     VoiceAudioFrame,
     VoiceTranscriptEvent,
@@ -88,6 +89,35 @@ export class VoiceWidgetService {
     }
 
     /**
+     * Push a still-image snapshot of the student's whiteboard into a running
+     * text-in/voice-out session. The agent sees it as a user image turn; the
+     * server feeds it into the live model via `SendImage`.
+     *
+     * Returns `{ OK: false, ErrorMessage }` without throwing for known failure
+     * modes (unknown SessionID, wrong transport kind) — matches the resolver's
+     * contract for `SubmitChannelTextTurn`.
+     */
+    public async SubmitCanvasSnapshot(
+        sessionID: string,
+        imageBase64: string,
+        mediaType: string
+    ): Promise<SubmitSnapshotResult> {
+        const mutation = `
+            mutation SubmitChannelCanvasSnapshot($input: SubmitChannelCanvasSnapshotInput!) {
+                SubmitChannelCanvasSnapshot(input: $input) {
+                    OK
+                    ErrorMessage
+                }
+            }
+        `;
+        const variables = {
+            input: { SessionID: sessionID, ImageBase64: imageBase64, MediaType: mediaType },
+        };
+        const data = await GraphQLDataProvider.ExecuteGQL(mutation, variables);
+        return (data?.SubmitChannelCanvasSnapshot as SubmitSnapshotResult) ?? { OK: false };
+    }
+
+    /**
      * End the session. Idempotent — server returns `{ OK: false }` for unknown
      * sessions but never throws.
      */
@@ -137,6 +167,9 @@ export class VoiceWidgetService {
                     Label
                     Status
                     Detail
+                    DrawOp
+                    OpID
+                    Source
                 }
             }
         `;

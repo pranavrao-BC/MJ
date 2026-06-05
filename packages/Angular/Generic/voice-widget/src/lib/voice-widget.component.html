@@ -24,6 +24,48 @@
         </div>
 
         <!--
+            Channel-toggle chips — Text / Voice / Whiteboard. These are
+            parallel channels: the transcript pane, voice (mic + audio), and
+            the shared whiteboard can each be shown independently. Active state
+            is reflected via the `is-active` class (tokened in SCSS).
+        -->
+        <div class="voice-widget__channel-toggles" role="group" aria-label="Channels">
+            <button
+                type="button"
+                class="voice-widget__channel-chip"
+                [class.voice-widget__channel-chip--active]="ShowTextChannel"
+                (click)="ToggleChannel('text')"
+                [attr.aria-pressed]="ShowTextChannel"
+                title="Toggle text transcript"
+            >
+                <i class="fa-solid fa-comment"></i>
+                <span>Text</span>
+            </button>
+            <button
+                type="button"
+                class="voice-widget__channel-chip"
+                [class.voice-widget__channel-chip--active]="ShowVoiceChannel"
+                (click)="ToggleChannel('voice')"
+                [attr.aria-pressed]="ShowVoiceChannel"
+                title="Toggle voice"
+            >
+                <i class="fa-solid fa-microphone-lines"></i>
+                <span>Voice</span>
+            </button>
+            <button
+                type="button"
+                class="voice-widget__channel-chip"
+                [class.voice-widget__channel-chip--active]="ShowWhiteboardChannel"
+                (click)="ToggleChannel('whiteboard')"
+                [attr.aria-pressed]="ShowWhiteboardChannel"
+                title="Toggle whiteboard"
+            >
+                <i class="fa-solid fa-chalkboard"></i>
+                <span>Whiteboard</span>
+            </button>
+        </div>
+
+        <!--
             Header action: just a subtle "End session" icon when active.
             The session auto-starts on first Send / mic click so the user
             never has to click "Start" — typing or talking IS the start.
@@ -43,6 +85,13 @@
         </div>
     </header>
 
+    <!--
+        Main panel — transcript and whiteboard sit SIDE BY SIDE when both
+        channels are on (flex row). Each pane flexes to fill; `min-height: 0`
+        on the panel lets the transcript scroll independently of the canvas.
+    -->
+    <div class="voice-widget__main">
+    @if (ShowTextChannel) {
     <!--
         Transcript — chat-bubble layout with avatars. User and agent rows have
         asymmetric border radii (matching the conversations module's
@@ -124,6 +173,17 @@
             </div>
         }
     </section>
+    }
+
+    @if (ShowWhiteboardChannel) {
+        <mj-whiteboard-channel
+            #whiteboard
+            class="voice-widget__whiteboard"
+            [Interactive]="true"
+            (UserStrokeCompleted)="OnUserStroke($event)"
+        ></mj-whiteboard-channel>
+    }
+    </div>
 
     <!--
         Actionable commands — chips below the transcript. Mirrors the
@@ -194,6 +254,7 @@
                 aria-label="Message to agent"
             ></textarea>
             <div class="voice-widget__composer-actions">
+                @if (ShowVoiceChannel) {
                 <button
                     type="button"
                     class="voice-widget__composer-btn"
@@ -209,6 +270,7 @@
                         <i class="fa-solid fa-microphone"></i>
                     }
                 </button>
+                }
                 <button
                     type="button"
                     class="voice-widget__composer-btn voice-widget__composer-btn--send"

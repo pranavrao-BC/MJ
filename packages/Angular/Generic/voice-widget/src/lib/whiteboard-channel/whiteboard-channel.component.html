@@ -1,0 +1,23 @@
+<div class="mj-whiteboard">
+    @if (Interactive) {
+        <div class="mj-whiteboard__toolbar">
+            <button type="button" class="mj-whiteboard__btn" (click)="OnClearClicked()" title="Clear the whiteboard">
+                <i class="fa-solid fa-eraser"></i>
+                <span>Clear</span>
+            </button>
+        </div>
+    }
+
+    <div class="mj-whiteboard__canvas-wrap">
+        <canvas
+            #canvas
+            class="mj-whiteboard__canvas"
+            [class.mj-whiteboard__canvas--interactive]="Interactive"
+            (pointerdown)="OnPointerDown($event)"
+            (pointermove)="OnPointerMove($event)"
+            (pointerup)="OnPointerUp($event)"
+            (pointercancel)="OnPointerUp($event)"
+            (pointerleave)="OnPointerUp($event)"
+        ></canvas>
+    </div>
+</div>

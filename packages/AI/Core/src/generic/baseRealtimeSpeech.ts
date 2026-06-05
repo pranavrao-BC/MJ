@@ -130,6 +130,13 @@ export interface RealtimeSpeechSession {
      * `response.create`) both support this.
      */
     SendText(text: string): void;
+    /**
+     * Send a still image into the live session as user input (e.g. a
+     * whiteboard snapshot). The model treats it as part of the user's turn so
+     * it can "see" what the student drew. Drivers without image support may
+     * implement this as a no-op.
+     */
+    SendImage(imageBase64: string, mediaType: string): void;
     /** Subscribe to audio frames coming back from the model. */
     OnAudio(cb: (chunk: AudioFrame) => void): void;
     /** Subscribe to transcript fragments (user or assistant, partial or final). */

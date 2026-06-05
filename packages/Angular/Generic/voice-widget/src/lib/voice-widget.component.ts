@@ -21,6 +21,11 @@ import { Subscription } from 'rxjs';
 
 import { VoiceWidgetService } from './voice-widget.service';
 import {
+    WhiteboardChannelComponent,
+    WhiteboardDrawOp,
+    LoadWhiteboardChannel,
+} from './whiteboard-channel/whiteboard-channel.component';
+import {
     VoiceActionableCommand,
     VoiceAudioFrame,
     VoiceChannelName,
@@ -28,6 +33,10 @@ import {
     VoiceTranscriptEvent,
     VoiceWidgetStatus,
 } from './voice-widget.types';
+
+// Keep the whiteboard child in the bundle — it's only resolved via the
+// template, which ESBuild can't see through for dead-code elimination.
+LoadWhiteboardChannel();
 
 // ---------------------------------------------------------------------------
 // Minimal SpeechRecognition type shim.
@@ -103,7 +112,7 @@ interface WindowWithSpeechRecognition extends Window {
 @Component({
     selector: 'mj-voice-widget',
     standalone: true,
-    imports: [CommonModule, FormsModule, MJButtonDirective],
+    imports: [CommonModule, FormsModule, MJButtonDirective, WhiteboardChannelComponent],
     templateUrl: './voice-widget.component.html',
     styleUrls: ['./voice-widget.component.scss'],
     encapsulation: ViewEncapsulation.Emulated,
@@ -112,6 +121,12 @@ export class VoiceWidgetComponent implements OnInit, OnDestroy, AfterViewChecked
     /** Scroll container — auto-scrolled to bottom on new messages. */
     @ViewChild('transcriptEl', { static: false })
     private transcriptEl?: ElementRef<HTMLElement>;
+    /**
+     * The whiteboard child. Present only while `ShowWhiteboardChannel` is true,
+     * so always guard with optional chaining before calling its methods.
+     */
+    @ViewChild('whiteboard')
+    private whiteboard?: WhiteboardChannelComponent;
     /** Track length of last-rendered transcript to detect new entries cheaply. */
     private lastRenderedTranscriptLength = 0;
     /** UUID of the agent to talk to. Required. */
@@ -179,6 +194,17 @@ export class VoiceWidgetComponent implements OnInit, OnDestroy, AfterViewChecked
     /** True while the agent's audio is playing back — mic auto-pauses. */
     public AgentSpeaking = false;
 
+    // -- Channel toggles -------------------------------------------------------
+    /**
+     * Which parallel channels are visible. Bound to the toggle chips in the
+     * header. The transcript (text) and voice channels default on; the
+     * whiteboard defaults OFF — the Explorer host flips it on for the tutoring
+     * demo via the `[ShowWhiteboardChannel]` input.
+     */
+    @Input() public ShowTextChannel = true;
+    @Input() public ShowVoiceChannel = true;
+    @Input() public ShowWhiteboardChannel = false;
+
     private readonly voiceService = inject(VoiceWidgetService);
     private readonly cdr = inject(ChangeDetectorRef);
     /**
@@ -212,6 +238,14 @@ export class VoiceWidgetComponent implements OnInit, OnDestroy, AfterViewChecked
     private silenceTimer: ReturnType<typeof setTimeout> | null = null;
     /** Pause length that counts as "done speaking" → submit the turn. */
     private readonly turnSilenceMs = 1400;
+    /**
+     * Debounce timer for whiteboard snapshot upload. Each completed student
+     * stroke pushes the deadline out; once the student pauses drawing we
+     * capture one PNG snapshot and send it up to the agent.
+     */
+    private snapshotTimer: ReturnType<typeof setTimeout> | null = null;
+    /** Quiet period after the last stroke before we upload a snapshot. */
+    private readonly snapshotDebounceMs = 1200;
     private audioCtx: AudioContext | null = null;
     /** Next scheduled start time for the audio graph — drives gapless playback. */
     private nextStartTime = 0;
@@ -280,6 +314,10 @@ export class VoiceWidgetComponent implements OnInit, OnDestroy, AfterViewChecked
         if (this.silenceTimer) {
             clearTimeout(this.silenceTimer);
             this.silenceTimer = null;
+        }
+        if (this.snapshotTimer) {
+            clearTimeout(this.snapshotTimer);
+            this.snapshotTimer = null;
         }
         if (this.beforeUnloadHandler) {
             window.removeEventListener('beforeunload', this.beforeUnloadHandler);
@@ -439,6 +477,69 @@ export class VoiceWidgetComponent implements OnInit, OnDestroy, AfterViewChecked
         if (!el) return;
         el.style.height = 'auto';
         el.style.height = `${el.scrollHeight}px`;
+    }
+
+    // ---------------------------------------------------------------------
+    // Public API — channel toggles + whiteboard
+    // ---------------------------------------------------------------------
+
+    /** Toggle one of the parallel channels on/off (template-bound chips). */
+    public ToggleChannel(name: 'text' | 'voice' | 'whiteboard'): void {
+        switch (name) {
+            case 'text':
+                this.ShowTextChannel = !this.ShowTextChannel;
+                break;
+            case 'voice':
+                this.ShowVoiceChannel = !this.ShowVoiceChannel;
+                break;
+            case 'whiteboard':
+                this.ShowWhiteboardChannel = !this.ShowWhiteboardChannel;
+                break;
+        }
+        this.cdr.markForCheck();
+    }
+
+    /**
+     * The student finished a freehand stroke. Debounce ~1.2s (so a flurry of
+     * strokes coalesces into one upload), then snapshot the canvas and send it
+     * up to the agent. Guarded on an active session — no point uploading before
+     * the agent is listening.
+     */
+    public OnUserStroke(_op: WhiteboardDrawOp): void {
+        if (this.Status !== 'active' || !this.SessionID) {
+            return;
+        }
+        if (this.snapshotTimer) {
+            clearTimeout(this.snapshotTimer);
+        }
+        this.snapshotTimer = setTimeout(() => {
+            this.snapshotTimer = null;
+            void this.uploadCanvasSnapshot();
+        }, this.snapshotDebounceMs);
+    }
+
+    /** Capture the current whiteboard as a PNG and push it to the agent. */
+    private async uploadCanvasSnapshot(): Promise<void> {
+        const sessionId = this.SessionID;
+        const board = this.whiteboard;
+        if (this.Status !== 'active' || !sessionId || !board) {
+            return;
+        }
+        try {
+            const base64 = board.CaptureSnapshotBase64();
+            if (!base64) {
+                return;
+            }
+            const result = await this.voiceService.SubmitCanvasSnapshot(sessionId, base64, 'image/png');
+            if (!result.OK) {
+                console.warn(
+                    '[VoiceWidget] SubmitCanvasSnapshot returned OK=false:',
+                    result.ErrorMessage
+                );
+            }
+        } catch (err) {
+            console.warn('[VoiceWidget] canvas snapshot upload failed:', this.formatError(err));
+        }
     }
 
     // ---------------------------------------------------------------------
@@ -697,6 +798,14 @@ export class VoiceWidgetComponent implements OnInit, OnDestroy, AfterViewChecked
                 break;
             case 'tool-call':
                 this.upsertToolBlock(event);
+                break;
+            case 'draw-op':
+                // Agent drew on the shared whiteboard. The runtime/server and
+                // client draw-op shapes are structurally identical but declared
+                // in separate files, so cast across the cross-declared union.
+                if (event.DrawOp) {
+                    this.whiteboard?.ApplyDrawOp(event.DrawOp as unknown as WhiteboardDrawOp);
+                }
                 break;
             case 'error':
                 this.IsAgentThinking = false;

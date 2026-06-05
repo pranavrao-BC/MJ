@@ -85,6 +85,24 @@ class GeminiLiveSession implements RealtimeSpeechSession {
         });
     }
 
+    public SendImage(imageBase64: string, mediaType: string): void {
+        if (this.closed || !this.genai || imageBase64.length === 0) {
+            return;
+        }
+        // Send the image as a COMPLETE user turn so Gemini Live treats it as
+        // part of the user's input (e.g. a whiteboard snapshot it should react
+        // to). Mirrors `SendText` — an inline image part instead of a text
+        // part. `turnComplete: true` triggers generation; without it the server
+        // waits for more input. (Verified against @google/genai 1.40.0:
+        // `Part.inlineData` is a `Blob` with `data`/`mimeType`, and
+        // `sendClientContent` accepts `turns: Content[]`.)
+        this.genai.sendClientContent({
+            turns: [{ role: 'user', parts: [{ inlineData: { mimeType: mediaType, data: imageBase64 } }] }],
+            turnComplete: true,
+        });
+        console.log(`[GeminiLiveRealtimeSpeech] realtime-send-image bytes=${imageBase64.length}`);
+    }
+
     public OnAudio(cb: AudioListener): void {
         this.audioCb = cb;
     }
