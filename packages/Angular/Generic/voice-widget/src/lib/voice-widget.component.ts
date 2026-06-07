@@ -26,6 +26,12 @@ import {
     LoadWhiteboardChannel,
 } from './whiteboard-channel/whiteboard-channel.component';
 import {
+    RunTimelineComponent,
+    LoadRunTimeline,
+} from './run-timeline/run-timeline.component';
+import {
+    RunActor,
+    RunBlock,
     VoiceActionableCommand,
     VoiceAudioFrame,
     VoiceChannelName,
@@ -37,6 +43,11 @@ import {
 // Keep the whiteboard child in the bundle — it's only resolved via the
 // template, which ESBuild can't see through for dead-code elimination.
 LoadWhiteboardChannel();
+// Same for the run-timeline child — template-only resolution, so anchor it.
+LoadRunTimeline();
+
+/** Which secondary side panel (if any) is open. At most one at a time. */
+export type VoiceSecondaryPanel = 'none' | 'activity' | 'whiteboard';
 
 // ---------------------------------------------------------------------------
 // Minimal SpeechRecognition type shim.
@@ -112,7 +123,7 @@ interface WindowWithSpeechRecognition extends Window {
 @Component({
     selector: 'mj-voice-widget',
     standalone: true,
-    imports: [CommonModule, FormsModule, MJButtonDirective, WhiteboardChannelComponent],
+    imports: [CommonModule, FormsModule, MJButtonDirective, WhiteboardChannelComponent, RunTimelineComponent],
     templateUrl: './voice-widget.component.html',
     styleUrls: ['./voice-widget.component.scss'],
     encapsulation: ViewEncapsulation.Emulated,
@@ -122,11 +133,32 @@ export class VoiceWidgetComponent implements OnInit, OnDestroy, AfterViewChecked
     @ViewChild('transcriptEl', { static: false })
     private transcriptEl?: ElementRef<HTMLElement>;
     /**
-     * The whiteboard child. Present only while `ShowWhiteboardChannel` is true,
-     * so always guard with optional chaining before calling its methods.
+     * The whiteboard child. Present only while the whiteboard panel is the
+     * active secondary panel (it's mounted/unmounted with the panel). A setter
+     * is used so that the moment it mounts we flush any draw-ops that arrived
+     * before it existed — see `pendingDrawOps`. Always guard with optional
+     * chaining before calling its methods.
      */
+    private _whiteboard?: WhiteboardChannelComponent;
     @ViewChild('whiteboard')
-    private whiteboard?: WhiteboardChannelComponent;
+    private set whiteboard(value: WhiteboardChannelComponent | undefined) {
+        this._whiteboard = value;
+        if (value) {
+            this.flushPendingDrawOps();
+        }
+    }
+    private get whiteboard(): WhiteboardChannelComponent | undefined {
+        return this._whiteboard;
+    }
+
+    /**
+     * Draw-ops that arrived before the whiteboard component was mounted. The
+     * agent can emit a `draw-op` at any time, but the whiteboard panel/child
+     * only exists while that panel is open. We buffer here, auto-open the
+     * panel, and flush on mount (or immediately if already present). Cleared
+     * once applied so an op is never drawn twice.
+     */
+    private pendingDrawOps: WhiteboardDrawOp[] = [];
     /** Track length of last-rendered transcript to detect new entries cheaply. */
     private lastRenderedTranscriptLength = 0;
     /** UUID of the agent to talk to. Required. */
@@ -194,16 +226,73 @@ export class VoiceWidgetComponent implements OnInit, OnDestroy, AfterViewChecked
     /** True while the agent's audio is playing back — mic auto-pauses. */
     public AgentSpeaking = false;
 
-    // -- Channel toggles -------------------------------------------------------
+    // -- Layout / panels -------------------------------------------------------
     /**
-     * Which parallel channels are visible. Bound to the toggle chips in the
-     * header. The transcript (text) and voice channels default on; the
-     * whiteboard defaults OFF — the Explorer host flips it on for the tutoring
-     * demo via the `[ShowWhiteboardChannel]` input.
+     * Whether voice (mic + audio) is available. Drives the mic button's
+     * presence. Defaults on; a host can disable it for text-only deployments.
      */
-    @Input() public ShowTextChannel = true;
     @Input() public ShowVoiceChannel = true;
-    @Input() public ShowWhiteboardChannel = false;
+
+    /**
+     * Whether the whiteboard feature is wired up. The Explorer host flips this
+     * on for the tutoring demo via `[ShowWhiteboardChannel]`. When true, the
+     * Whiteboard toggle appears in the toolbar and the secondary panel opens
+     * to the whiteboard on first start.
+     */
+    private _showWhiteboardChannel = false;
+    @Input()
+    public set ShowWhiteboardChannel(value: boolean) {
+        const previous = this._showWhiteboardChannel;
+        this._showWhiteboardChannel = value;
+        // Host turned the whiteboard on (e.g. tutoring demo) — open it.
+        if (value && !previous) {
+            this.SecondaryPanel = 'whiteboard';
+        }
+        // Host turned it off while it was showing — fall back to no panel.
+        if (!value && this.SecondaryPanel === 'whiteboard') {
+            this.SecondaryPanel = 'none';
+        }
+    }
+    public get ShowWhiteboardChannel(): boolean {
+        return this._showWhiteboardChannel;
+    }
+
+    /**
+     * Which secondary side panel is open. At most one shows at a time so the
+     * conversation stays the calm primary column. The whiteboard channel must
+     * stay mounted while it's the active panel; Activity (the run timeline) is
+     * a lightweight presentational view fed by `RunActors`.
+     */
+    public SecondaryPanel: VoiceSecondaryPanel = 'none';
+
+    /** Display name of the driving agent — shown in the header + run timeline. */
+    @Input() public AgentDisplayName = 'Agent';
+
+    /**
+     * Live run model — the block + actor view. The root agent (`Id:'root'`)
+     * plus one sub-agent per delegation (keyed by `CallID`), each owning the
+     * ordered blocks flowing in (consumed) / out (emitted). Fed DOWN into
+     * `<mj-run-timeline>` as an `@Input()` — no `@ViewChild`, no imperative
+     * feed, no race. This is the data-down fix.
+     */
+    public RunActors: RunActor[] = [];
+
+    /** Root-actor id constant — the driving agent. */
+    private static readonly ROOT_ACTOR_ID = 'root';
+
+    /**
+     * Timestamp of the last `draw` block pushed to the root actor. Used to
+     * dedupe a rapid flurry of draw-ops into roughly one block per second so
+     * the run view doesn't get spammed during a multi-stroke drawing.
+     */
+    private lastDrawBlockAt = 0;
+
+    /**
+     * True while the root actor has an in-progress `out` text block that should
+     * be updated in place (rather than appended) as more text arrives. Reset on
+     * each new user turn and when a response finalizes.
+     */
+    private rootTextBlockActive = false;
 
     private readonly voiceService = inject(VoiceWidgetService);
     private readonly cdr = inject(ChangeDetectorRef);
@@ -483,19 +572,17 @@ export class VoiceWidgetComponent implements OnInit, OnDestroy, AfterViewChecked
     // Public API — channel toggles + whiteboard
     // ---------------------------------------------------------------------
 
-    /** Toggle one of the parallel channels on/off (template-bound chips). */
-    public ToggleChannel(name: 'text' | 'voice' | 'whiteboard'): void {
-        switch (name) {
-            case 'text':
-                this.ShowTextChannel = !this.ShowTextChannel;
-                break;
-            case 'voice':
-                this.ShowVoiceChannel = !this.ShowVoiceChannel;
-                break;
-            case 'whiteboard':
-                this.ShowWhiteboardChannel = !this.ShowWhiteboardChannel;
-                break;
+    /**
+     * Toggle a secondary side panel. Opening one closes the other (only one
+     * secondary panel is visible at a time); clicking the open one closes it,
+     * returning to the calm conversation-only layout.
+     */
+    public ToggleSecondaryPanel(panel: 'activity' | 'whiteboard'): void {
+        // Opening the whiteboard implies the channel must be wired up.
+        if (panel === 'whiteboard') {
+            this._showWhiteboardChannel = true;
         }
+        this.SecondaryPanel = this.SecondaryPanel === panel ? 'none' : panel;
         this.cdr.markForCheck();
     }
 
@@ -763,6 +850,8 @@ export class VoiceWidgetComponent implements OnInit, OnDestroy, AfterViewChecked
      * the streaming path was empty.
      */
     private onTranscriptEvent(event: VoiceTranscriptEvent): void {
+        // Every session that produces events has a root agent actor.
+        this.ensureRootActor();
         switch (event.Kind) {
             case 'user':
                 if (event.Text) {
@@ -772,6 +861,10 @@ export class VoiceWidgetComponent implements OnInit, OnDestroy, AfterViewChecked
                     this.assistantBuffer = '';
                     // A user turn just started — agent will now think.
                     this.IsAgentThinking = true;
+                    // Root consumes a `user` block; the next reply starts fresh
+                    // accumulated text, so reset the live-text tracker.
+                    this.pushRootBlock({ Direction: 'in', Kind: 'user', Summary: event.Text });
+                    this.rootTextBlockActive = false;
                 }
                 break;
             case 'assistant-text':
@@ -784,13 +877,20 @@ export class VoiceWidgetComponent implements OnInit, OnDestroy, AfterViewChecked
                     this.IsAgentThinking = false;
                     this.assistantBuffer += event.Text;
                     this.upsertAssistantTranscript(this.assistantBuffer);
+                    // Mirror into the run model: a single `out` text block that
+                    // grows in place as deltas arrive.
+                    this.upsertRootTextBlock(this.assistantBuffer);
                 }
                 break;
             case 'agent-response':
                 this.IsAgentThinking = false;
                 if (event.Text) {
                     this.appendTranscript('agent', event.Text);
+                    // Finalize the root text block with the canonical message.
+                    this.upsertRootTextBlock(event.Text);
                 }
+                // The text block is now final — the next turn starts a new one.
+                this.rootTextBlockActive = false;
                 if (event.ActionableCommands && event.ActionableCommands.length > 0) {
                     this.ActionableCommands = event.ActionableCommands;
                 }
@@ -804,7 +904,9 @@ export class VoiceWidgetComponent implements OnInit, OnDestroy, AfterViewChecked
                 // client draw-op shapes are structurally identical but declared
                 // in separate files, so cast across the cross-declared union.
                 if (event.DrawOp) {
-                    this.whiteboard?.ApplyDrawOp(event.DrawOp as unknown as WhiteboardDrawOp);
+                    this.routeDrawOp(event.DrawOp as unknown as WhiteboardDrawOp);
+                    // Mirror into the run model: an `out` draw block (deduped).
+                    this.pushRootDrawBlock();
                 }
                 break;
             case 'error':
@@ -815,6 +917,47 @@ export class VoiceWidgetComponent implements OnInit, OnDestroy, AfterViewChecked
                 break;
         }
         this.cdr.markForCheck();
+    }
+
+    // ---------------------------------------------------------------------
+    // Internals — whiteboard draw-op routing
+    // ---------------------------------------------------------------------
+
+    /**
+     * Route an agent draw-op to the whiteboard. The whiteboard child only
+     * exists while its panel is open, so:
+     *   1. Auto-open the whiteboard panel (the agent is drawing — show it).
+     *   2. If the child is mounted, apply immediately.
+     *   3. Otherwise buffer the op; it flushes when the child mounts (via the
+     *      `whiteboard` ViewChild setter) and again on the next microtask in
+     *      case the panel was opened synchronously this tick.
+     */
+    private routeDrawOp(op: WhiteboardDrawOp): void {
+        this._showWhiteboardChannel = true;
+        if (this.SecondaryPanel !== 'whiteboard') {
+            this.SecondaryPanel = 'whiteboard';
+        }
+        if (this.whiteboard) {
+            this.whiteboard.ApplyDrawOp(op);
+            return;
+        }
+        // Not mounted yet — buffer and flush once the view materializes. The
+        // microtask covers the case where we just opened the panel this tick.
+        this.pendingDrawOps.push(op);
+        Promise.resolve().then(() => this.flushPendingDrawOps());
+    }
+
+    /** Apply and clear any buffered draw-ops once the whiteboard is present. */
+    private flushPendingDrawOps(): void {
+        const board = this.whiteboard;
+        if (!board || this.pendingDrawOps.length === 0) {
+            return;
+        }
+        const ops = this.pendingDrawOps;
+        this.pendingDrawOps = [];
+        for (const op of ops) {
+            board.ApplyDrawOp(op);
+        }
     }
 
     /**
@@ -863,6 +1006,10 @@ export class VoiceWidgetComponent implements OnInit, OnDestroy, AfterViewChecked
         // track `agentTurnInProgress` so other code (e.g. mic-suppression
         // heuristics) can read it.
         this.agentTurnInProgress = true;
+        // Mirror into the run model: one accumulating `out` audio block on the
+        // root actor (frame count climbs; we never push a block per frame).
+        this.ensureRootActor();
+        this.upsertRootAudioBlock(this.AudioChunkCount);
 
         const audioBuffer = this.decodePCMFrame(frame, this.audioCtx);
         const source = this.audioCtx.createBufferSource();
@@ -1006,6 +1153,11 @@ export class VoiceWidgetComponent implements OnInit, OnDestroy, AfterViewChecked
         this.AudioChunkCount = 0;
         this.agentTurnInProgress = false;
         this.AgentSpeaking = false;
+        // Clear the run model — it belongs to the session that just ended.
+        this.RunActors = [];
+        this.pendingDrawOps = [];
+        this.lastDrawBlockAt = 0;
+        this.rootTextBlockActive = false;
         if (this.Status !== 'error') {
             this.Status = 'ended';
         }
@@ -1046,9 +1198,206 @@ export class VoiceWidgetComponent implements OnInit, OnDestroy, AfterViewChecked
                 { Role: 'tool', Text: text, Timestamp: new Date(), CallID: event.CallID, Status: status },
             ];
         }
+        // Mirror the block into the live block + actor run model.
+        this.applyToolCallToRunModel(event, status);
         // A tool block means the agent is actively doing work, not idle-thinking.
         this.IsAgentThinking = false;
         this.cdr.markForCheck();
+    }
+
+    // ---------------------------------------------------------------------
+    // Internals — block + actor run model
+    // ---------------------------------------------------------------------
+
+    /** Ensure the root agent actor exists. Created lazily on the first event. */
+    private ensureRootActor(): void {
+        if (this.RunActors.some((a) => a.Id === VoiceWidgetComponent.ROOT_ACTOR_ID)) {
+            return;
+        }
+        const root: RunActor = {
+            Id: VoiceWidgetComponent.ROOT_ACTOR_ID,
+            Label: this.AgentDisplayName,
+            Kind: 'agent',
+            Status: 'active',
+            Blocks: [],
+            StartedAt: Date.now(),
+        };
+        // Root always leads the list so sub-agents render nested beneath it.
+        this.RunActors = [root, ...this.RunActors];
+    }
+
+    /** Locate the mutable root actor (created by `ensureRootActor`). */
+    private rootActor(): RunActor | undefined {
+        return this.RunActors.find((a) => a.Id === VoiceWidgetComponent.ROOT_ACTOR_ID);
+    }
+
+    /** Append a block to the root actor and trigger a re-render. */
+    private pushRootBlock(block: RunBlock): void {
+        const root = this.rootActor();
+        if (!root) {
+            return;
+        }
+        root.Blocks = [...root.Blocks, block];
+        this.RunActors = this.RunActors.slice();
+    }
+
+    /**
+     * Upsert the root actor's in-progress `out` text block. While
+     * `rootTextBlockActive`, update the last text block in place as deltas
+     * arrive; otherwise start a new one. This is the run-model mirror of the
+     * transcript's type-in-place behavior.
+     */
+    private upsertRootTextBlock(text: string): void {
+        const root = this.rootActor();
+        if (!root) {
+            return;
+        }
+        const summary = text.trim();
+        if (!summary) {
+            return;
+        }
+        const last = root.Blocks[root.Blocks.length - 1];
+        if (this.rootTextBlockActive && last && last.Direction === 'out' && last.Kind === 'text') {
+            last.Summary = summary;
+        } else {
+            root.Blocks = [...root.Blocks, { Direction: 'out', Kind: 'text', Summary: summary }];
+            this.rootTextBlockActive = true;
+        }
+        this.RunActors = this.RunActors.slice();
+    }
+
+    /**
+     * Push an `out` draw block onto the root actor, deduped to roughly one per
+     * second so a rapid drawing flurry doesn't flood the run view.
+     */
+    private pushRootDrawBlock(): void {
+        const now = Date.now();
+        if (now - this.lastDrawBlockAt < 1000) {
+            return;
+        }
+        this.lastDrawBlockAt = now;
+        this.pushRootBlock({ Direction: 'out', Kind: 'draw', Summary: 'drew on whiteboard' });
+    }
+
+    /**
+     * Upsert a single `out` audio block on the root actor, accumulating the
+     * frame count rather than pushing a block per PCM frame.
+     */
+    private upsertRootAudioBlock(frameCount: number): void {
+        const root = this.rootActor();
+        if (!root) {
+            return;
+        }
+        const summary = `speaking · ${frameCount} frame${frameCount === 1 ? '' : 's'}`;
+        const existing = root.Blocks.find((b) => b.Direction === 'out' && b.Kind === 'audio');
+        if (existing) {
+            existing.Summary = summary;
+        } else {
+            root.Blocks = [...root.Blocks, { Direction: 'out', Kind: 'audio', Summary: summary }];
+        }
+        this.RunActors = this.RunActors.slice();
+    }
+
+    /**
+     * Apply a delegation `tool-call` block to the run model. Two effects:
+     *   1. The ROOT actor emits an `out` `tool-call` block ("delegate → X")
+     *      once, on the `running` event.
+     *   2. A SUB-AGENT actor (keyed by `CallID`) is upserted: on `running` it
+     *      starts (consuming an `in` `user` task block); on `complete` it
+     *      finishes (emitting an `out` `tool-result` block) with a duration; on
+     *      `error` it goes to error status.
+     */
+    private applyToolCallToRunModel(
+        event: VoiceTranscriptEvent,
+        status: 'running' | 'complete' | 'error',
+    ): void {
+        const callId = event.CallID;
+        if (!callId) {
+            return;
+        }
+        const target = this.deriveRunEntryName(event) || 'Sub-agent';
+        const existing = this.RunActors.find((a) => a.Id === callId);
+
+        if (status === 'running') {
+            if (!existing) {
+                // Root emits its delegation block (once).
+                this.pushRootBlock({ Direction: 'out', Kind: 'tool-call', Summary: `delegate → ${target}` });
+                const sub: RunActor = {
+                    Id: callId,
+                    Label: target,
+                    Kind: 'sub-agent',
+                    Status: 'running',
+                    StartedAt: Date.now(),
+                    Blocks: event.Detail
+                        ? [{ Direction: 'in', Kind: 'user', Summary: event.Detail }]
+                        : [],
+                };
+                this.RunActors = [...this.RunActors, sub];
+            } else {
+                existing.Status = 'running';
+                existing.Label = target || existing.Label;
+                this.RunActors = this.RunActors.slice();
+            }
+            return;
+        }
+
+        // complete / error — finalize the sub-agent.
+        if (!existing) {
+            return;
+        }
+        existing.Status = status;
+        existing.Label = target || existing.Label;
+        existing.DurationMs = Date.now() - (existing.StartedAt ?? Date.now());
+        if (status === 'complete' && event.Detail) {
+            existing.Blocks = [
+                ...existing.Blocks,
+                { Direction: 'out', Kind: 'tool-result', Summary: event.Detail },
+            ];
+        }
+        this.RunActors = this.RunActors.slice();
+    }
+
+    /**
+     * Derive the delegated target's display name from the block.
+     *
+     * There is no server-side provenance field naming the target sub-agent, so
+     * we parse the human `Label` the loop agent emits:
+     *   "Delegating to Code Smith…"  → "Code Smith"
+     *   "Code Smith done (15.0s)"     → "Code Smith"
+     *   "Code Smith failed: <reason>" → "Code Smith"
+     * Falling back to `ToolName`. Presentation heuristic only.
+     */
+    private deriveRunEntryName(event: VoiceTranscriptEvent): string {
+        const parsed = this.parseTargetFromLabel(event.Label);
+        if (parsed) {
+            return parsed;
+        }
+        return event.ToolName?.trim() || '';
+    }
+
+    /** Pull the target name out of a free-form progress label. */
+    private parseTargetFromLabel(label: string | undefined): string | null {
+        if (!label) {
+            return null;
+        }
+        const trimmed = label.trim();
+        // "Delegating to <Name>…" — take everything after the "to ".
+        const delegateMatch = /(?:delegating|handing off|calling)\s+to\s+(.+)$/i.exec(trimmed);
+        if (delegateMatch) {
+            return this.stripTrailingNoise(delegateMatch[1]);
+        }
+        // "<Name> done (…)" / "<Name> failed: …" / "<Name> complete" — take the
+        // leading clause up to the status verb.
+        const statusMatch = /^(.+?)\s+(?:done|complete|completed|finished|failed|error)\b/i.exec(trimmed);
+        if (statusMatch) {
+            return this.stripTrailingNoise(statusMatch[1]);
+        }
+        return this.stripTrailingNoise(trimmed) || null;
+    }
+
+    /** Trim trailing ellipsis / punctuation / whitespace from a parsed name. */
+    private stripTrailingNoise(value: string): string {
+        return value.replace(/[….\s:,-]+$/u, '').trim();
     }
 
     private formatError(err: unknown): string {

@@ -57,6 +57,18 @@ export type DrawOp =
           Width: number;
       }
     | { Type: 'text'; X: number; Y: number; Text: string; Color: string; FontSize: number }
+    /**
+     * Place a raster image on the canvas. `Src` is an image URL or a base64
+     * data URI (e.g. `data:image/png;base64,…`). `X`/`Y` are the top-left
+     * anchor and `W`/`H` the bounding-box size, all normalized 0..1.
+     */
+    | { Type: 'image'; Src: string; X: number; Y: number; W: number; H: number }
+    /**
+     * Place inline SVG on the canvas. `Markup` is the raw SVG markup string
+     * (e.g. `<svg …>…</svg>`). `X`/`Y` are the top-left anchor and `W`/`H` the
+     * bounding-box size into which the markup is scaled, all normalized 0..1.
+     */
+    | { Type: 'svg'; Markup: string; X: number; Y: number; W: number; H: number }
     | { Type: 'clear' };
 
 export interface UserTranscriptEvent {

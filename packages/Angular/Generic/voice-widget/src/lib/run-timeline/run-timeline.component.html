@@ -1,0 +1,81 @@
+<div class="run-timeline">
+    <!-- Legend: names the two visual vocabularies so the viewer LEARNS them. -->
+    <div class="run-timeline__legend" aria-hidden="true">
+        <span class="run-timeline__legend-item">
+            <span class="run-timeline__legend-node"></span>
+            <span class="run-timeline__legend-label">Actor</span>
+        </span>
+        <span class="run-timeline__legend-item">
+            <span class="run-timeline__legend-chip"></span>
+            <span class="run-timeline__legend-label">Block</span>
+        </span>
+    </div>
+
+    @if (Actors.length === 0) {
+        <div class="run-timeline__empty">No activity yet.</div>
+    } @else {
+        @for (actor of Actors; track TrackByActorId($index, actor)) {
+            <!-- ACTOR = a labeled NODE (a "machine"), never a chat bubble. -->
+            <section
+                class="run-timeline__actor"
+                [class.run-timeline__actor--sub]="actor.Kind === 'sub-agent'"
+                [attr.data-status]="actor.Status"
+            >
+                <header class="run-timeline__actor-header">
+                    <span class="run-timeline__actor-icon" aria-hidden="true">
+                        <i [class]="ActorIcon(actor)"></i>
+                    </span>
+
+                    <span class="run-timeline__actor-label">{{ actor.Label }}</span>
+
+                    <span class="run-timeline__actor-badge" [attr.data-kind]="actor.Kind">
+                        <span class="run-timeline__actor-badge-tag">ACTOR</span>
+                        <span class="run-timeline__actor-badge-sep">&middot;</span>
+                        <span class="run-timeline__actor-badge-kind">{{ ActorKindLabel(actor) }}</span>
+                    </span>
+
+                    <span class="run-timeline__actor-status" aria-hidden="true">
+                        @switch (actor.Status) {
+                            @case ('running') { <i class="fa-solid fa-spinner fa-spin"></i> }
+                            @case ('complete') { <i class="fa-solid fa-check"></i> }
+                            @case ('error') { <i class="fa-solid fa-xmark"></i> }
+                            @default { <span class="run-timeline__dot-active"></span> }
+                        }
+                    </span>
+
+                    @if (ElapsedLabel(actor)) {
+                        <span class="run-timeline__actor-elapsed">{{ ElapsedLabel(actor) }}</span>
+                    }
+                </header>
+
+                <!-- BLOCKS = discrete typed chips flowing IN / OUT of the node. -->
+                @if (actor.Blocks.length > 0) {
+                    <div class="run-timeline__blocks">
+                        @for (block of actor.Blocks; track TrackByBlockIndex($index)) {
+                            <div class="run-timeline__block" [attr.data-direction]="block.Direction">
+                                <span class="run-timeline__block-dir" [attr.data-direction]="block.Direction">
+                                    @if (block.Direction === 'in') {
+                                        <i class="fa-solid fa-caret-left" aria-hidden="true"></i>
+                                        <span class="run-timeline__block-dir-label">{{ BlockDirectionLabel(block) }}</span>
+                                    } @else {
+                                        <span class="run-timeline__block-dir-label">{{ BlockDirectionLabel(block) }}</span>
+                                        <i class="fa-solid fa-caret-right" aria-hidden="true"></i>
+                                    }
+                                </span>
+
+                                <span class="run-timeline__block-kind" [attr.data-kind]="block.Kind">
+                                    <i [class]="BlockIcon(block)" aria-hidden="true"></i>
+                                    <span class="run-timeline__block-kind-label">{{ BlockKindLabel(block) }}</span>
+                                </span>
+
+                                <span class="run-timeline__block-summary">{{ block.Summary }}</span>
+                            </div>
+                        }
+                    </div>
+                } @else {
+                    <div class="run-timeline__blocks-empty">No blocks yet.</div>
+                }
+            </section>
+        }
+    }
+</div>

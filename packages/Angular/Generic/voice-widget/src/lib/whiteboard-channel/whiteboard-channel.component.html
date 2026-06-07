@@ -1,6 +1,29 @@
 <div class="mj-whiteboard">
     @if (Interactive) {
         <div class="mj-whiteboard__toolbar">
+            <div class="mj-whiteboard__group" role="group" aria-label="Drawing tool">
+                <button
+                    type="button"
+                    class="mj-whiteboard__btn"
+                    [class.mj-whiteboard__btn--active]="ActiveTool === 'pen'"
+                    (click)="SelectPen()"
+                    title="Draw freehand"
+                >
+                    <i class="fa-solid fa-pen"></i>
+                    <span>Pen</span>
+                </button>
+                <button
+                    type="button"
+                    class="mj-whiteboard__btn"
+                    [class.mj-whiteboard__btn--active]="ActiveTool === 'select'"
+                    (click)="SelectSelect()"
+                    title="Select, move and resize objects"
+                >
+                    <i class="fa-solid fa-arrow-pointer"></i>
+                    <span>Select</span>
+                </button>
+            </div>
+
             <button type="button" class="mj-whiteboard__btn" (click)="OnClearClicked()" title="Clear the whiteboard">
                 <i class="fa-solid fa-eraser"></i>
                 <span>Clear</span>
@@ -9,15 +32,6 @@
     }
 
     <div class="mj-whiteboard__canvas-wrap">
-        <canvas
-            #canvas
-            class="mj-whiteboard__canvas"
-            [class.mj-whiteboard__canvas--interactive]="Interactive"
-            (pointerdown)="OnPointerDown($event)"
-            (pointermove)="OnPointerMove($event)"
-            (pointerup)="OnPointerUp($event)"
-            (pointercancel)="OnPointerUp($event)"
-            (pointerleave)="OnPointerUp($event)"
-        ></canvas>
+        <canvas #canvas class="mj-whiteboard__canvas"></canvas>
     </div>
 </div>

@@ -5,6 +5,11 @@
  * rule. Consumers import `BaseRealtimeSpeech`, `AudioFrame`, `ToolDefinition`,
  * etc. directly from `@memberjunction/ai`.
  */
+export * from './channel-core';
+// actor-core re-exported explicitly: `streamOf` is intentionally omitted here
+// because channel-core already exports a `streamOf` (over ChannelBlock). The
+// actor-core variant (over Block) stays importable directly from './actor-core'.
+export { type Actor, type Block, type BlockKind, type BlockStream, agentActor, collect } from './actor-core';
 export * from './ChannelSession';
 export * from './BaseChannelEngine';
 export * from './engines/TextChatChannelEngine';

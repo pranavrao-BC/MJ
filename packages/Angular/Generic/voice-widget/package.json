@@ -30,6 +30,7 @@
     "@memberjunction/ng-agent-client": "5.39.0",
     "@memberjunction/ng-base-types": "5.39.0",
     "@memberjunction/ng-ui-components": "5.39.0",
+    "fabric": "^6.0.0",
     "rxjs": "~7.8.0",
     "tslib": "^2.8.1"
   },

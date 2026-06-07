@@ -88,6 +88,14 @@ export interface VoiceRealtimeConfig {
     };
     AIVoiceProfileID?: string;
     /**
+     * Optional extra system-prompt text appended (verbatim) to the realtime
+     * model's instructions for THIS channel only — on top of the agent's own
+     * name/description and the generic capability instructions the engine adds.
+     * Use it for channel-specific behavior (e.g. demo scripts, domain context)
+     * without touching the agent's global metadata.
+     */
+    Instructions?: string;
+    /**
      * `native` lets the model emit tool calls directly; `hand-off-to-llm` forces
      * intent → text LLM → tool route (PersonaPlex's only option today).
      */

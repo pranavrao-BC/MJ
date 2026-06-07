@@ -1,0 +1,407 @@
+/* ---------------------------------------------------------------------------
+   Run timeline — the ACTOR / BLOCK model made VISUALLY LEGIBLE.
+
+   Two unmistakable visual vocabularies:
+     - ACTOR = a NODE. A bordered, slightly-elevated "machine" card with a
+       squared-off node aesthetic (notched corner, strong border, kind badge).
+       Deliberately nothing like a chat bubble.
+     - BLOCK = a CHIP. A small rounded pill flowing IN (left, info token) or OUT
+       (right, brand token) of the node, stamped with a color-coded Kind tag.
+       The Kind IS the block's identity.
+
+   Delegation: sub-agent nodes nest under the agent that spawned them, joined
+   by an elbow connector so "Agent emitted tool-call -> Sub-agent ran" reads.
+
+   A quiet legend at the top names both concepts so the viewer learns them.
+
+   NOTE: consumed verbatim by ngc (no SCSS compilation). MUST be flat, valid
+   CSS — no `&` nesting, no `//` comments, no nested rules.
+
+   All chrome colors come from semantic design tokens (dark-mode + white-label
+   safe). Per-Kind chip colors are derived from tokens via color-mix(). No hex.
+   --------------------------------------------------------------------------- */
+
+:host {
+    display: block;
+    height: 100%;
+    min-height: 0;
+    min-width: 0;
+}
+
+.run-timeline {
+    display: flex;
+    flex-direction: column;
+    gap: 16px;
+    height: 100%;
+    min-height: 0;
+    overflow-y: auto;
+    padding: 18px;
+    background: var(--mj-bg-surface);
+    color: var(--mj-text-primary);
+}
+
+.run-timeline::-webkit-scrollbar {
+    width: 8px;
+}
+.run-timeline::-webkit-scrollbar-thumb {
+    background: var(--mj-border-strong);
+    border-radius: 4px;
+}
+.run-timeline::-webkit-scrollbar-track {
+    background: transparent;
+}
+
+/* -- Legend (teaches the vocabulary) --------------------------------------- */
+
+.run-timeline__legend {
+    display: flex;
+    align-items: center;
+    gap: 18px;
+    padding: 8px 12px;
+    border-radius: 8px;
+    background: var(--mj-bg-surface-sunken);
+    border: 1px dashed var(--mj-border-subtle);
+    flex-shrink: 0;
+}
+
+.run-timeline__legend-item {
+    display: inline-flex;
+    align-items: center;
+    gap: 7px;
+}
+
+/* Mini node swatch — squared, bordered, elevated (mirrors the actor node). */
+.run-timeline__legend-node {
+    width: 18px;
+    height: 13px;
+    border-radius: 3px;
+    border: 1.5px solid var(--mj-border-strong);
+    background: var(--mj-bg-surface-elevated);
+    box-shadow: 0 1px 2px color-mix(in srgb, var(--mj-text-primary) 12%, transparent);
+}
+
+/* Mini chip swatch — fully rounded pill (mirrors a block chip). */
+.run-timeline__legend-chip {
+    width: 22px;
+    height: 11px;
+    border-radius: 999px;
+    background: color-mix(in srgb, var(--mj-brand-primary) 22%, var(--mj-bg-surface));
+    border: 1px solid color-mix(in srgb, var(--mj-brand-primary) 35%, transparent);
+}
+
+.run-timeline__legend-label {
+    font-size: 0.68rem;
+    font-weight: 600;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    color: var(--mj-text-muted);
+}
+
+/* -- Empty states ---------------------------------------------------------- */
+
+.run-timeline__empty {
+    color: var(--mj-text-muted);
+    font-size: 0.85rem;
+    padding: 8px 4px;
+}
+
+.run-timeline__blocks-empty {
+    color: var(--mj-text-muted);
+    font-size: 0.72rem;
+    font-style: italic;
+    padding: 2px 4px;
+}
+
+/* ===========================================================================
+   ACTOR = NODE
+   =========================================================================== */
+
+.run-timeline__actor {
+    position: relative;
+    display: flex;
+    flex-direction: column;
+    gap: 12px;
+    padding: 14px 16px;
+    /* Squared node aesthetic — small radius, NOT a soft chat bubble. */
+    border-radius: 8px;
+    border: 1.5px solid var(--mj-border-strong);
+    background: var(--mj-bg-surface-elevated);
+    /* Slight elevation = "a machine sitting on the surface". */
+    box-shadow: 0 2px 6px color-mix(in srgb, var(--mj-text-primary) 8%, transparent);
+    flex-shrink: 0;
+}
+
+/* A thin accent bar on the left edge brands the node by its driving status. */
+.run-timeline__actor::after {
+    content: '';
+    position: absolute;
+    left: 0;
+    top: 8px;
+    bottom: 8px;
+    width: 3px;
+    border-radius: 3px;
+    background: var(--mj-border-strong);
+}
+.run-timeline__actor[data-status='running']::after {
+    background: var(--mj-brand-primary);
+}
+.run-timeline__actor[data-status='complete']::after {
+    background: var(--mj-status-success);
+}
+.run-timeline__actor[data-status='error']::after {
+    background: var(--mj-status-error);
+}
+.run-timeline__actor[data-status='active']::after {
+    background: var(--mj-status-success);
+}
+
+/* -- Delegation: sub-agent nodes nest under the delegating agent ----------- */
+.run-timeline__actor--sub {
+    margin-left: 26px;
+    background: var(--mj-bg-surface-card);
+}
+
+/* Left rail + elbow connector visually wiring the child to its parent. */
+.run-timeline__actor--sub::before {
+    content: '';
+    position: absolute;
+    left: -26px;
+    top: -8px;
+    bottom: auto;
+    height: 30px;
+    width: 22px;
+    border-left: 2px solid color-mix(in srgb, var(--mj-brand-primary) 55%, var(--mj-border-default));
+    border-bottom: 2px solid color-mix(in srgb, var(--mj-brand-primary) 55%, var(--mj-border-default));
+    border-bottom-left-radius: 8px;
+    pointer-events: none;
+}
+
+/* -- Actor header ---------------------------------------------------------- */
+
+.run-timeline__actor-header {
+    display: flex;
+    align-items: center;
+    gap: 9px;
+    min-width: 0;
+}
+
+.run-timeline__actor-icon {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 26px;
+    height: 26px;
+    border-radius: 6px;
+    font-size: 0.92rem;
+    color: var(--mj-text-inverse);
+    background: var(--mj-brand-primary);
+}
+.run-timeline__actor--sub .run-timeline__actor-icon {
+    background: color-mix(in srgb, var(--mj-brand-primary) 75%, var(--mj-text-primary));
+}
+
+.run-timeline__actor-label {
+    font-size: 0.95rem;
+    font-weight: 700;
+    color: var(--mj-text-primary);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+    min-width: 0;
+}
+
+/* The "ACTOR · KIND" badge — signals node-ness loud and clear. */
+.run-timeline__actor-badge {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 0.6rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    padding: 2px 7px;
+    border-radius: 4px;
+    border: 1px solid var(--mj-border-default);
+    background: var(--mj-bg-surface-sunken);
+    color: var(--mj-text-secondary);
+}
+.run-timeline__actor-badge[data-kind='sub-agent'] {
+    border-color: color-mix(in srgb, var(--mj-brand-primary) 40%, transparent);
+    background: color-mix(in srgb, var(--mj-brand-primary) 12%, var(--mj-bg-surface));
+    color: var(--mj-brand-primary);
+}
+.run-timeline__actor-badge-tag {
+    font-weight: 800;
+}
+.run-timeline__actor-badge-sep {
+    opacity: 0.6;
+}
+.run-timeline__actor-badge-kind {
+    font-weight: 600;
+}
+
+/* Status mark on the right of the header. */
+.run-timeline__actor-status {
+    margin-left: auto;
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    justify-content: center;
+    width: 16px;
+    font-size: 0.85rem;
+    color: var(--mj-text-muted);
+}
+.run-timeline__actor[data-status='running'] .run-timeline__actor-status {
+    color: var(--mj-brand-primary);
+}
+.run-timeline__actor[data-status='complete'] .run-timeline__actor-status {
+    color: var(--mj-status-success);
+}
+.run-timeline__actor[data-status='error'] .run-timeline__actor-status {
+    color: var(--mj-status-error);
+}
+
+/* "active" resting dot — gently pulses to read as live. */
+.run-timeline__dot-active {
+    display: inline-block;
+    width: 9px;
+    height: 9px;
+    border-radius: 50%;
+    background: var(--mj-status-success);
+    animation: run-timeline-pulse 2s ease-in-out infinite;
+}
+
+.run-timeline__actor-elapsed {
+    flex-shrink: 0;
+    font-size: 0.74rem;
+    color: var(--mj-text-muted);
+    font-variant-numeric: tabular-nums;
+}
+.run-timeline__actor[data-status='error'] .run-timeline__actor-elapsed {
+    color: var(--mj-status-error);
+}
+
+/* ===========================================================================
+   BLOCK = CHIP
+   =========================================================================== */
+
+.run-timeline__blocks {
+    display: flex;
+    flex-direction: column;
+    gap: 7px;
+}
+
+/* A discrete unit — rounded, subtle inset surface. Reads as "a tile", not a
+   line of chat. */
+.run-timeline__block {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    padding: 7px 12px;
+    border-radius: 999px;
+    background: var(--mj-bg-surface);
+    border: 1px solid var(--mj-border-subtle);
+    min-width: 0;
+}
+
+/* Direction marker: IN (info/neutral) vs OUT (brand) — consumed vs emitted. */
+.run-timeline__block-dir {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 3px;
+    font-size: 0.58rem;
+    font-weight: 800;
+    letter-spacing: 0.5px;
+    padding: 2px 6px;
+    border-radius: 4px;
+}
+.run-timeline__block-dir[data-direction='in'] {
+    color: var(--mj-status-info-text, var(--mj-status-info));
+    background: color-mix(in srgb, var(--mj-status-info) 14%, transparent);
+}
+.run-timeline__block-dir[data-direction='out'] {
+    color: var(--mj-brand-primary);
+    background: color-mix(in srgb, var(--mj-brand-primary) 14%, transparent);
+}
+.run-timeline__block-dir i {
+    font-size: 0.62rem;
+}
+
+/* The Kind tag pill — the block's identity. Color-coded per kind via tokens. */
+.run-timeline__block-kind {
+    flex-shrink: 0;
+    display: inline-flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 0.62rem;
+    font-weight: 700;
+    text-transform: uppercase;
+    letter-spacing: 0.4px;
+    padding: 3px 9px;
+    border-radius: 999px;
+    /* Default (text) — brand-tinted. */
+    color: var(--mj-brand-primary);
+    background: color-mix(in srgb, var(--mj-brand-primary) 12%, var(--mj-bg-surface));
+    border: 1px solid color-mix(in srgb, var(--mj-brand-primary) 28%, transparent);
+}
+.run-timeline__block-kind i {
+    font-size: 0.66rem;
+}
+
+/* Per-Kind color coding — each block type is visually distinct. */
+.run-timeline__block-kind[data-kind='user'] {
+    color: var(--mj-status-info-text, var(--mj-status-info));
+    background: color-mix(in srgb, var(--mj-status-info) 12%, var(--mj-bg-surface));
+    border-color: color-mix(in srgb, var(--mj-status-info) 28%, transparent);
+}
+.run-timeline__block-kind[data-kind='audio'] {
+    color: var(--mj-status-success-text, var(--mj-status-success));
+    background: color-mix(in srgb, var(--mj-status-success) 12%, var(--mj-bg-surface));
+    border-color: color-mix(in srgb, var(--mj-status-success) 28%, transparent);
+}
+.run-timeline__block-kind[data-kind='tool-call'] {
+    color: var(--mj-status-warning-text, var(--mj-status-warning));
+    background: color-mix(in srgb, var(--mj-status-warning) 14%, var(--mj-bg-surface));
+    border-color: color-mix(in srgb, var(--mj-status-warning) 30%, transparent);
+}
+.run-timeline__block-kind[data-kind='tool-result'] {
+    color: var(--mj-text-secondary);
+    background: color-mix(in srgb, var(--mj-text-secondary) 12%, var(--mj-bg-surface));
+    border-color: var(--mj-border-default);
+}
+.run-timeline__block-kind[data-kind='draw'] {
+    color: var(--mj-status-error-text, var(--mj-status-error));
+    background: color-mix(in srgb, var(--mj-status-error) 11%, var(--mj-bg-surface));
+    border-color: color-mix(in srgb, var(--mj-status-error) 26%, transparent);
+}
+
+.run-timeline__block-kind-label {
+    line-height: 1;
+}
+
+.run-timeline__block-summary {
+    flex: 1;
+    min-width: 0;
+    font-size: 0.8rem;
+    color: var(--mj-text-muted);
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+/* -- Animations ------------------------------------------------------------ */
+
+@keyframes run-timeline-pulse {
+    0% {
+        box-shadow: 0 0 0 0 color-mix(in srgb, var(--mj-status-success) 50%, transparent);
+    }
+    70% {
+        box-shadow: 0 0 0 5px color-mix(in srgb, var(--mj-status-success) 0%, transparent);
+    }
+    100% {
+        box-shadow: 0 0 0 0 color-mix(in srgb, var(--mj-status-success) 0%, transparent);
+    }
+}

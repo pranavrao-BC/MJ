@@ -71,107 +71,59 @@ const DELEGATE_TOOL: ToolDefinition = {
 
 /**
  * The tool that lets the realtime model DRAW on the shared whiteboard the
- * student is looking at — the visual counterpart to talking. Each call carries
- * an `ops` array; the engine fans each op out as a `DrawOpBlockEvent` on the
- * transcript path, and the widget renders it onto the canvas live.
+ * student is looking at — the visual counterpart to talking. The model draws by
+ * supplying a single inline `svg` string; the engine emits an (optional) clear
+ * plus a full-canvas `svg` draw-op on the transcript path, and the widget
+ * renders it onto the canvas live via Fabric.
  *
- * Coordinates are NORMALIZED 0..1 (origin top-left) so the same op renders
- * correctly at any canvas size. The description is deliberately teaching-
- * oriented so the model uses the whiteboard the way a good tutor would: draw
- * the diagram, label it, then talk about it.
+ * The schema is intentionally FLAT (top-level string/boolean only — no nested
+ * arrays-of-objects). The earlier nested `ops` schema made Gemini Live close the
+ * socket with 1008, which killed function-calling entirely. SVG is also the most
+ * precise way to draw a real diagram in one shot.
  */
 const DRAW_ON_WHITEBOARD_TOOL: ToolDefinition = {
     Name: 'draw_on_whiteboard',
     Description:
-        'Draw on the shared whiteboard the student is looking at. Use this whenever a picture ' +
-        'helps you teach: diagrams, geometric shapes, labeled examples, worked solutions, or ' +
-        'sketches. Prefer drawing AND narrating together (e.g. draw a right triangle, then say ' +
-        'what you drew). All coordinates are normalized 0..1 with the origin at the top-left ' +
-        'corner: X grows rightward, Y grows downward, so the center of the board is (0.5, 0.5). ' +
-        'Sizes/widths/font sizes are in pixels at render time. Send several ops in one call to ' +
-        'compose a figure (e.g. a shape plus its labels). Use a "clear" op to wipe the board ' +
-        'before starting a fresh diagram.',
+        'Draw on the shared whiteboard the student is looking at by supplying clean inline SVG ' +
+        'markup — diagrams, geometry, flowcharts, labeled figures, worked examples. Use this ' +
+        'whenever a picture helps you teach, and narrate while you draw (e.g. draw a right ' +
+        'triangle, then say what you drew). Use a viewBox like "0 0 100 100" and keep the SVG ' +
+        'self-contained.',
     ParametersSchema: {
         type: 'object',
         properties: {
-            ops: {
-                type: 'array',
-                description: 'Ordered list of drawing operations to apply to the whiteboard.',
-                items: {
-                    type: 'object',
-                    properties: {
-                        Type: {
-                            type: 'string',
-                            enum: ['stroke', 'shape', 'text', 'clear'],
-                            description:
-                                "The kind of op: 'stroke' = freehand path through Points; " +
-                                "'shape' = a primitive (line/rect/ellipse/triangle/arrow) in a " +
-                                "bounding box; 'text' = a text label; 'clear' = erase the whole board.",
-                        },
-                        Points: {
-                            type: 'array',
-                            description:
-                                "For Type='stroke': the ordered points of the freehand path, each " +
-                                'normalized 0..1.',
-                            items: {
-                                type: 'object',
-                                properties: {
-                                    X: { type: 'number', description: 'Horizontal position, 0..1.' },
-                                    Y: { type: 'number', description: 'Vertical position, 0..1.' },
-                                },
-                                required: ['X', 'Y'],
-                            },
-                        },
-                        Shape: {
-                            type: 'string',
-                            enum: ['line', 'rect', 'ellipse', 'triangle', 'arrow'],
-                            description: "For Type='shape': which primitive to draw.",
-                        },
-                        X: {
-                            type: 'number',
-                            description:
-                                "For Type='shape' or 'text': left/anchor X position, normalized 0..1.",
-                        },
-                        Y: {
-                            type: 'number',
-                            description:
-                                "For Type='shape' or 'text': top/anchor Y position, normalized 0..1.",
-                        },
-                        W: {
-                            type: 'number',
-                            description: "For Type='shape': bounding-box width, normalized 0..1.",
-                        },
-                        H: {
-                            type: 'number',
-                            description: "For Type='shape': bounding-box height, normalized 0..1.",
-                        },
-                        Text: {
-                            type: 'string',
-                            description: "For Type='text': the label to render.",
-                        },
-                        Color: {
-                            type: 'string',
-                            description:
-                                'CSS color string (e.g. "#1d4ed8", "red"). Applies to stroke, ' +
-                                'shape, and text ops.',
-                        },
-                        Width: {
-                            type: 'number',
-                            description:
-                                "For Type='stroke' or 'shape': line width in pixels at render time.",
-                        },
-                        FontSize: {
-                            type: 'number',
-                            description: "For Type='text': font size in pixels at render time.",
-                        },
-                    },
-                    required: ['Type'],
-                },
+            svg: {
+                type: 'string',
+                description:
+                    'Inline SVG markup to render on the whiteboard. Use a viewBox like ' +
+                    '"0 0 100 100"; draw clean diagrams/figures/labels. This replaces the board ' +
+                    'content unless you also set clear=false semantics — see clear.',
+            },
+            clear: {
+                type: 'boolean',
+                description: 'If true, wipe the whiteboard before drawing this SVG (default true).',
             },
         },
-        required: ['ops'],
+        required: ['svg'],
     },
 };
+
+/**
+ * Appended to every realtime system prompt because the `draw_on_whiteboard`
+ * tool is always offered. Realtime models will happily NARRATE a drawing
+ * without ever calling the function unless they're told, in plain terms, that
+ * calling the tool is what actually makes marks the user can see.
+ */
+const WHITEBOARD_INSTRUCTIONS = [
+    'You share a live whiteboard with the user. To put ANYTHING on it you MUST call the',
+    '`draw_on_whiteboard` tool with inline SVG — describing a drawing in words does NOT draw it.',
+    'Whenever a diagram, sketch, labeled figure, or worked example would help, actually call the',
+    'tool, then narrate briefly what you drew. The board is LANDSCAPE: use a wide viewBox like',
+    '"0 0 320 180" and spread your drawing across the FULL width and height so it is large and',
+    'readable — never bunch it into a corner. Make strokes, shapes, and font sizes generous',
+    '(e.g. font-size 12–18 in that viewBox). Keep the SVG self-contained. The user draws on the',
+    'same board; you receive snapshots of their work as images, so react to what they draw.',
+].join(' ');
 
 @RegisterClass(BaseChannelEngine, 'RealtimeChannelEngine')
 export class RealtimeChannelEngine extends BaseChannelEngine {
@@ -358,34 +310,56 @@ export class RealtimeChannelEngine extends BaseChannelEngine {
     }
 
     /**
-     * Execute `draw_on_whiteboard`: fan the model's `ops` array out as one
-     * `DrawOpBlockEvent` per op on the transcript path (the widget renders each
-     * onto the shared canvas). Drawing is instant, so unlike `delegate_to_agent`
-     * there's no running→complete pair — we emit a single completed `tool-call`
-     * block for visibility in the text channel, then return.
+     * Execute `draw_on_whiteboard`: render the model's inline SVG onto the shared
+     * canvas. The flat schema carries a single `svg` string plus an optional
+     * `clear` flag; we emit a running tool-call block, an optional `clear`
+     * draw-op, a full-canvas `svg` draw-op (X/Y=0, W/H=1), then a complete block.
+     * The widget renders each draw-op via Fabric.
      *
-     * Defensive throughout: malformed ops are skipped rather than thrown, so a
-     * single bad op from the model never aborts the whole figure or the session.
+     * Empty `svg` is a graceful no-op — we never throw, so a malformed call from
+     * the model can't abort the session.
      */
     private drawOnWhiteboard(ctx: ChannelRunContext, call: ToolCall): ToolResult {
-        const rawOps = call.Arguments['ops'];
-        const ops = Array.isArray(rawOps) ? rawOps : [];
-        let count = 0;
-        for (const raw of ops) {
-            const op = coerceDrawOp(raw);
-            if (!op) {
-                continue;
-            }
+        const svg = String(call.Arguments['svg'] ?? '');
+        const clear = call.Arguments['clear'] !== false;
+        if (svg.trim().length === 0) {
+            LogStatus(`[ChannelSession ${ctx.SessionID}] realtime-draw skipped (empty svg)`);
+            ctx.OnTranscript?.({
+                Kind: 'tool-call',
+                CallID: call.CallID,
+                ToolName: call.Name,
+                Label: 'Whiteboard: nothing to draw',
+                Status: 'complete',
+                Detail: 'No SVG supplied.',
+            });
+            return { CallID: call.CallID, Result: 'no svg' };
+        }
+
+        ctx.OnTranscript?.({
+            Kind: 'tool-call',
+            CallID: call.CallID,
+            ToolName: call.Name,
+            Label: '✏️ Drawing on whiteboard…',
+            Status: 'running',
+        });
+
+        if (clear) {
             ctx.OnTranscript?.({
                 Kind: 'draw-op',
                 OpID: randomUUID(),
                 Source: 'agent',
-                Op: op,
+                Op: { Type: 'clear' },
             });
-            count++;
         }
+        ctx.OnTranscript?.({
+            Kind: 'draw-op',
+            OpID: randomUUID(),
+            Source: 'agent',
+            Op: { Type: 'svg', Markup: svg, X: 0, Y: 0, W: 1, H: 1 },
+        });
+
         LogStatus(
-            `[ChannelSession ${ctx.SessionID}] realtime-draw ops=${ops.length} drawn=${count}`
+            `[ChannelSession ${ctx.SessionID}] realtime-draw svgLen=${svg.length} clear=${clear}`
         );
         ctx.OnTranscript?.({
             Kind: 'tool-call',
@@ -393,9 +367,8 @@ export class RealtimeChannelEngine extends BaseChannelEngine {
             ToolName: call.Name,
             Label: '✏️ Drew on whiteboard',
             Status: 'complete',
-            Detail: `${count} shape(s)`,
         });
-        return { CallID: call.CallID, Result: `drawn ${count} shape(s)` };
+        return { CallID: call.CallID, Result: 'drew svg' };
     }
 
     private onInterrupt(session: RealtimeSpeechSession, _reason: InterruptReason): void {
@@ -460,20 +433,27 @@ export class RealtimeChannelEngine extends BaseChannelEngine {
         ctx: ChannelRunContext,
         modelApiName: string | undefined
     ): RealtimeSpeechConnectOptions {
+        const cfg = narrowVoiceRealtimeConfig(ctx);
         const agent = ctx.AgentMetadata;
         const systemPrompt = [
             agent.Name ? `You are ${agent.Name}.` : '',
             agent.Description ?? '',
             'You are speaking with the user by voice. Keep replies concise and conversational; avoid markdown, code blocks, and long lists.',
+            WHITEBOARD_INSTRUCTIONS,
+            cfg.Instructions ?? '',
         ]
             .filter((s) => s.length > 0)
             .join('\n\n');
 
+        // draw_on_whiteboard uses a FLAT parameter schema (top-level `svg` string +
+        // `clear` boolean — no nested arrays-of-objects) so Gemini Live accepts it
+        // for function-calling; the earlier nested `ops` schema triggered a 1008 close.
+        const realtimeTools: ToolDefinition[] = [DELEGATE_TOOL, DRAW_ON_WHITEBOARD_TOOL];
         return {
             SystemPrompt: systemPrompt,
             ModelAPIName: modelApiName,
             ContextUser: ctx.ContextUser,
-            Tools: [DELEGATE_TOOL, DRAW_ON_WHITEBOARD_TOOL],
+            Tools: realtimeTools,
         };
     }
 
@@ -574,92 +554,4 @@ function narrowVoiceRealtimeConfig(ctx: ChannelRunContext): VoiceRealtimeConfig 
 
 function errMsg(err: unknown): string {
     return err instanceof Error ? err.message : String(err);
-}
-
-/** A finite number, defaulting to `fallback` for anything else (NaN, strings, undefined). */
-function num(value: unknown, fallback: number): number {
-    return typeof value === 'number' && Number.isFinite(value) ? value : fallback;
-}
-
-/** A non-empty string, or `undefined`. */
-function str(value: unknown): string | undefined {
-    return typeof value === 'string' && value.length > 0 ? value : undefined;
-}
-
-/**
- * Defensively coerce one raw op (as the model emitted it) into a typed
- * `DrawOp`, or `null` if it's not salvageable. We're permissive on detail
- * (missing color/width get sensible defaults) but strict on structure: a stroke
- * needs at least one point, a shape needs a valid `Shape`, text needs `Text`.
- */
-function coerceDrawOp(raw: unknown): DrawOp | null {
-    if (typeof raw !== 'object' || raw === null) {
-        return null;
-    }
-    const op = raw as Record<string, unknown>;
-    switch (op['Type']) {
-        case 'clear':
-            return { Type: 'clear' };
-        case 'stroke':
-            return coerceStroke(op);
-        case 'shape':
-            return coerceShape(op);
-        case 'text':
-            return coerceText(op);
-        default:
-            return null;
-    }
-}
-
-const SHAPE_KINDS = ['line', 'rect', 'ellipse', 'triangle', 'arrow'] as const;
-type ShapeKind = (typeof SHAPE_KINDS)[number];
-
-function coerceStroke(op: Record<string, unknown>): DrawOp | null {
-    const rawPoints = op['Points'];
-    if (!Array.isArray(rawPoints)) {
-        return null;
-    }
-    const points: { X: number; Y: number }[] = [];
-    for (const p of rawPoints) {
-        if (typeof p === 'object' && p !== null) {
-            const pt = p as Record<string, unknown>;
-            points.push({ X: num(pt['X'], 0), Y: num(pt['Y'], 0) });
-        }
-    }
-    if (points.length === 0) {
-        return null;
-    }
-    return { Type: 'stroke', Points: points, Color: str(op['Color']) ?? '#000000', Width: num(op['Width'], 2) };
-}
-
-function coerceShape(op: Record<string, unknown>): DrawOp | null {
-    const shape = op['Shape'];
-    if (typeof shape !== 'string' || !SHAPE_KINDS.includes(shape as ShapeKind)) {
-        return null;
-    }
-    return {
-        Type: 'shape',
-        Shape: shape as ShapeKind,
-        X: num(op['X'], 0),
-        Y: num(op['Y'], 0),
-        W: num(op['W'], 0),
-        H: num(op['H'], 0),
-        Color: str(op['Color']) ?? '#000000',
-        Width: num(op['Width'], 2),
-    };
-}
-
-function coerceText(op: Record<string, unknown>): DrawOp | null {
-    const text = str(op['Text']);
-    if (text === undefined) {
-        return null;
-    }
-    return {
-        Type: 'text',
-        X: num(op['X'], 0),
-        Y: num(op['Y'], 0),
-        Text: text,
-        Color: str(op['Color']) ?? '#000000',
-        FontSize: num(op['FontSize'], 16),
-    };
 }

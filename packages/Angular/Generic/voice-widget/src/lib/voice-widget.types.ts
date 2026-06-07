@@ -88,6 +88,8 @@ export type VoiceDrawOp =
           Width: number;
       }
     | { Type: 'text'; X: number; Y: number; Text: string; Color: string; FontSize: number }
+    | { Type: 'image'; Src: string; X: number; Y: number; W: number; H: number }
+    | { Type: 'svg'; Markup: string; X: number; Y: number; W: number; H: number }
     | { Type: 'clear' };
 
 /** Result of `EndChannelSession`. */
@@ -134,6 +136,49 @@ export interface VoiceTranscriptEvent {
  * outward — host apps decide how to execute the command (navigate, run report,
  * etc.).
  */
+/**
+ * One block flowing into or out of an actor. The block/actor model is the
+ * teaching artifact: an actor *consumes* `in` blocks and *emits* `out` blocks.
+ * Built live from transcript + audio events and pushed DOWN into the run view.
+ *
+ *   - Direction `in`  — the actor received this (a user turn, a delegated task).
+ *   - Direction `out` — the actor produced this (text, audio, a tool call, a
+ *                       tool result, a whiteboard drawing).
+ */
+export interface RunBlock {
+    /** Whether the block flows into (consumed) or out of (emitted) the actor. */
+    Direction: 'in' | 'out';
+    /** The kind of content this block carries — drives its icon + label. */
+    Kind: 'user' | 'text' | 'audio' | 'tool-call' | 'tool-result' | 'draw';
+    /** Short, truncatable one-line summary of the block. */
+    Summary: string;
+}
+
+/**
+ * One actor in the live run — the root agent or a delegated sub-agent. Each
+ * actor owns the ordered list of blocks it has consumed/emitted, so the view
+ * can make the "this actor takes these blocks and produces those" flow legible.
+ *
+ * The root agent is keyed `'root'`; sub-agents are keyed by their delegation
+ * `CallID`. Upserted in place as the run progresses.
+ */
+export interface RunActor {
+    /** Upsert key — `'root'` for the driving agent, the delegation `CallID` otherwise. */
+    Id: string;
+    /** Display name (e.g. the agent name, or a parsed sub-agent target "Code Smith"). */
+    Label: string;
+    /** Whether this is the root agent or a delegated sub-agent. */
+    Kind: 'agent' | 'sub-agent';
+    /** Lifecycle/activity status — drives the header icon. */
+    Status: 'active' | 'running' | 'complete' | 'error';
+    /** Ordered blocks flowing in/out of this actor. */
+    Blocks: RunBlock[];
+    /** When this actor started (sub-agents: on `running`). Used for elapsed/duration. */
+    StartedAt?: number;
+    /** Final duration in ms, set when a sub-agent completes or errors. */
+    DurationMs?: number;
+}
+
 export interface VoiceActionableCommand {
     /** Human label for the chip. */
     label?: string;

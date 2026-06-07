@@ -30,7 +30,11 @@ LoadVoiceWidget();
     selector: 'mj-voice-demo-resource',
     template: `
         <div class="voice-demo-resource">
-            <mj-voice-widget [AgentID]="AgentID" [ChannelName]="'voice-realtime'"></mj-voice-widget>
+            <mj-voice-widget
+                [AgentID]="AgentID"
+                [ChannelName]="'voice-realtime'"
+                [ShowWhiteboardChannel]="true"
+            ></mj-voice-widget>
         </div>
     `,
     styles: [
