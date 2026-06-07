@@ -61,14 +61,27 @@
       </div>
     }
 
-    <!-- Send Button (Icon Only) - Positioned over editor -->
-    <button
-      class="send-button-icon"
-      [disabled]="!canSend"
-      (click)="onSendClick()"
-      title="Send message (Enter)"
-      >
-      <i class="fa-solid fa-paper-plane"></i>
-    </button>
+    <!-- Stop / Send Button (Icon Only) - Positioned over editor -->
+    @if (IsAwaitingResponse) {
+      <!-- STOP: cancel the in-progress agent run -->
+      <button
+        class="stop-button-icon"
+        [class.is-stopping]="IsStopping"
+        [disabled]="IsStopping"
+        (click)="onStopClick()"
+        [title]="IsStopping ? 'Stopping…' : 'Stop the agent'"
+        >
+        <i class="fa-solid fa-square"></i>
+      </button>
+    } @else {
+      <button
+        class="send-button-icon"
+        [disabled]="!canSend"
+        (click)="onSendClick()"
+        title="Send message (Enter)"
+        >
+        <i class="fa-solid fa-paper-plane"></i>
+      </button>
+    }
   </div>
 </div>

@@ -4,7 +4,8 @@ import { DatabaseProviderBase, LogError, LogStatus, Metadata, RunView, UserInfo,
 import { MJConversationDetailEntity, MJConversationDetailAttachmentEntity, MJConversationDetailArtifactEntity, MJArtifactVersionEntity, MJAIAgentRequestEntity, ArtifactMetadataEngine } from '@memberjunction/core-entities';
 import { RouteArtifact } from './artifact-routing.js';
 import { AgentRunner, ArtifactToolManager } from '@memberjunction/ai-agents';
-import { MJAIAgentEntityExtended, MJAIAgentRunEntityExtended, ExecuteAgentResult, ConversationUtility, AttachmentData } from '@memberjunction/ai-core-plus';
+import { MJAIAgentEntityExtended, MJAIAgentRunEntityExtended, ExecuteAgentResult, ConversationUtility, AttachmentData, AgentStreamBlock } from '@memberjunction/ai-core-plus';
+import { GraphQLJSONObject } from 'graphql-type-json';
 import { AIEngine } from '@memberjunction/aiengine';
 import { ChatMessage, ChatMessageContent } from '@memberjunction/ai';
 import { ResolverBase } from '../generic/ResolverBase.js';
@@ -77,6 +78,14 @@ export class AgentStreamingContent {
 
     @Field({ nullable: true })
     agentName?: string;
+
+    /**
+     * Typed content-block describing this streaming chunk (discriminated union by `Kind`:
+     * 'text' | 'thinking' | 'tool-call' | 'tool-result' | 'html'). Carried verbatim from the
+     * agent's streaming callback so clients can render structured blocks rather than raw text.
+     */
+    @Field(() => GraphQLJSONObject, { nullable: true })
+    block?: AgentStreamBlock;
 }
 
 @ObjectType()
@@ -148,6 +157,18 @@ export class AgentExecutionStreamMessage {
 
 
 
+
+/**
+ * In-flight agent runs that can be cancelled, keyed by the run's
+ * `ConversationDetailID` (the AI response detail the client is waiting on —
+ * the same id the chat's STOP button passes to `CancelAIAgentRun`). Each entry
+ * is the run's `AbortController`; aborting its signal stops the run because
+ * `BaseAgent` checks `cancellationToken.aborted` throughout its loop. Entries
+ * are registered when the run id first appears (progress callback) and removed
+ * when the run settles (finally) or is cancelled. Module-level (process-local,
+ * ephemeral) — not a singleton service.
+ */
+const inFlightAgentRuns = new Map<string, AbortController>();
 
 @Resolver()
 export class RunAIAgentResolver extends ResolverBase {
@@ -241,13 +262,19 @@ export class RunAIAgentResolver extends ResolverBase {
     /**
      * Create streaming progress callback
      */
-    private createProgressCallback(pubSub: PubSubEngine, sessionId: string, userPayload: UserPayload, agentRunRef: { current: any }) {
+    private createProgressCallback(pubSub: PubSubEngine, sessionId: string, userPayload: UserPayload, agentRunRef: { current: any }, abortController?: AbortController) {
         return (progress: any) => {
             // Capture the agent run into the ref as soon as any progress event carries it (even
             // "noise" steps), so the fire-and-forget liveness pulse can read its id/status mid-run
             // rather than only after RunAgentInConversation returns.
             if (progress.metadata?.agentRun) {
                 agentRunRef.current = progress.metadata.agentRun;
+                // Register this run for cancellation under its ConversationDetailID (what the
+                // chat STOP button cancels by) as soon as that id exists. Idempotent.
+                const cancelKey = progress.metadata.agentRun.ConversationDetailID;
+                if (abortController && cancelKey && !inFlightAgentRuns.has(cancelKey)) {
+                    inFlightAgentRuns.set(cancelKey, abortController);
+                }
             }
 
             // Only publish progress for significant steps (not initialization noise)
@@ -348,7 +375,10 @@ export class RunAIAgentResolver extends ResolverBase {
                     content: chunk.content,
                     isPartial: !chunk.isComplete,
                     stepName: chunk.stepType,
-                    agentName: chunk.modelName
+                    agentName: chunk.modelName,
+                    // Carry the typed content-block (if BaseAgent supplied one) through to the
+                    // published JSON payload so clients receive data.streaming.block.
+                    block: chunk.block as AgentStreamBlock | undefined
                 },
                 timestamp: new Date()
             };
@@ -387,7 +417,13 @@ export class RunAIAgentResolver extends ResolverBase {
         runRef?: { current: MJAIAgentRunEntityExtended | null }
     ): Promise<AIAgentRunResult> {
         const startTime = Date.now();
-        
+
+        // Cancellation handle for this run. Passed to the agent as its
+        // `cancellationToken`; registered in `inFlightAgentRuns` (by the progress
+        // callback, once the run id exists) so `CancelAIAgentRun` / the chat STOP
+        // button can abort it; cleaned up in `finally`.
+        const abortController = new AbortController();
+
         try {
             LogStatus(`=== RUNNING AI AGENT FOR ID: ${agentId} ===`);
 
@@ -431,7 +467,8 @@ export class RunAIAgentResolver extends ResolverBase {
                 payload: payload ? SafeJSONParse(payload) : undefined,
                 contextUser: currentUser,
                 sessionID: sessionId,
-                onProgress: this.createProgressCallback(pubSub, sessionId, userPayload, agentRunRef),
+                cancellationToken: abortController.signal,
+                onProgress: this.createProgressCallback(pubSub, sessionId, userPayload, agentRunRef, abortController),
                 onStreaming: this.createStreamingCallback(pubSub, sessionId, userPayload, agentRunRef),
                 lastRunId: lastRunId,
                 autoPopulateLastRunPayload: autoPopulateLastRunPayload,
@@ -545,7 +582,36 @@ export class RunAIAgentResolver extends ResolverBase {
                 executionTimeMs: executionTime,
                 result: JSON.stringify(errorResult)
             };
+        } finally {
+            // Drop this run's cancellation handle from the in-flight registry however
+            // it ended (success, error, or abort), keyed by value so we don't need the id.
+            for (const [key, controller] of inFlightAgentRuns) {
+                if (controller === abortController) {
+                    inFlightAgentRuns.delete(key);
+                }
+            }
         }
+    }
+
+    /**
+     * Cancel an in-progress AI agent run. The chat STOP button (and, for voice /
+     * realtime modalities, a user interruption) calls this with the
+     * `ConversationDetailID` of the AI response it is waiting on. Aborts the run's
+     * `AbortController`, which `BaseAgent` observes via its `cancellationToken`.
+     *
+     * @returns `true` if a matching in-flight run was found and aborted; `false`
+     *          if no such run is registered (already finished, or never existed).
+     */
+    @Mutation(() => Boolean)
+    async CancelAIAgentRun(@Arg('conversationDetailId') conversationDetailId: string): Promise<boolean> {
+        const controller = inFlightAgentRuns.get(conversationDetailId);
+        if (controller && !controller.signal.aborted) {
+            controller.abort();
+            inFlightAgentRuns.delete(conversationDetailId);
+            LogStatus(`[RunAIAgentResolver] CancelAIAgentRun aborted run for conversationDetailId=${conversationDetailId}`);
+            return true;
+        }
+        return false;
     }
 
     /**

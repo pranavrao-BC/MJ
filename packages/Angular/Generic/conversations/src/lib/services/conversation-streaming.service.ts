@@ -5,6 +5,7 @@ import { ActiveTasksService } from './active-tasks.service';
 import { DataCacheService } from './data-cache.service';
 import { MJConversationDetailEntity } from '@memberjunction/core-entities';
 import { UserInfo } from '@memberjunction/core';
+import { AgentStreamBlock } from '@memberjunction/ai-core-plus';
 
 /**
  * Completion event structure broadcast when an agent finishes.
@@ -54,6 +55,12 @@ export interface MessageProgressUpdate {
   stepCount?: number;
   /** Identifies which backend resolver published this update */
   resolver?: 'TaskOrchestrator' | 'RunAIAgentResolver' | string;
+  /**
+   * Typed content block (when the backend supplied one on this streaming chunk).
+   * Carried verbatim from `data.streaming.block`. Renderers switch on `block.Kind`
+   * to draw text / thinking / tool-call / html blocks live during a run.
+   */
+  block?: AgentStreamBlock;
 }
 
 /**
@@ -91,6 +98,12 @@ export class ConversationStreamingService implements OnDestroy {
     agentRunId: string;
     timestamp: Date;
   }>();
+
+  // Ordered, accumulated typed content blocks per in-progress AI message.
+  // Key: conversationDetailId, Value: blocks in arrival order. A `tool-result`
+  // block is merged into the prior `tool-call` with the same CallID (it updates
+  // that call's Status/Detail) rather than being stored separately.
+  private streamingBlocks = new Map<string, AgentStreamBlock[]>();
 
   // Observable for components to subscribe to completion events in real-time
   public completionEvents$ = new Subject<CompletionEvent>();
@@ -328,7 +341,14 @@ export class ConversationStreamingService implements OnDestroy {
   private async routeAgentProgress(statusObj: any): Promise<void> {
     try {
       // Extract progress information from RunAIAgentResolver message
-      const { agentRun, progress, type } = statusObj.data || {};
+      const { agentRun, progress, type, streaming } = statusObj.data || {};
+
+      // Handle streaming content chunks (type: 'streaming' / 'StreamingContent').
+      // These carry a typed `block` (and/or a `content` string) for live rendering.
+      if (streaming && type !== 'complete') {
+        await this.routeStreamingChunk(agentRun, streaming);
+        return;
+      }
 
       // Handle completion messages - backend sends type: 'complete' when agent finishes.
       // Now includes conversationDetailId and enriched result data (success, errorMessage, result)
@@ -349,6 +369,10 @@ export class ConversationStreamingService implements OnDestroy {
 
         // Broadcast completion event if we have the conversationDetailId
         if (conversationDetailId) {
+          // Drop accumulated streaming blocks — the finalized message.Message now
+          // renders, so the in-progress block view must stop (avoids double-render).
+          this.clearStreamingBlocks(conversationDetailId);
+
           // Store for late-arriving components (navigation scenario)
           this.recentCompletions.set(conversationDetailId, {
             conversationDetailId,
@@ -426,6 +450,48 @@ export class ConversationStreamingService implements OnDestroy {
   }
 
   /**
+   * Route a streaming content chunk (typed block + partial text) to the in-progress
+   * message. Accumulates the typed block into the per-message ordered list, then
+   * invokes the registered callbacks so the renderer refreshes. The block ride along
+   * on the `MessageProgressUpdate` as `block` (in addition to `message` text).
+   */
+  private async routeStreamingChunk(agentRun: any, streaming: any): Promise<void> {
+    const conversationDetailId: string | undefined = agentRun?.ConversationDetailID;
+    if (!conversationDetailId) {
+      // Without a target we can't route or accumulate — drop silently (the
+      // fire-and-forget client subscription handles these when no UI is bound).
+      return;
+    }
+
+    const block = streaming?.block as AgentStreamBlock | undefined;
+    if (block) {
+      this.accumulateStreamingBlock(conversationDetailId, block);
+    }
+
+    const callbacks = this.callbackRegistry.get(conversationDetailId) || [];
+    if (callbacks.length === 0) {
+      return;
+    }
+
+    const progressUpdate: MessageProgressUpdate = {
+      message: streaming?.content ?? '',
+      taskName: agentRun?.Agent || 'Agent',
+      conversationDetailId,
+      metadata: { agentRun } as MessageProgressMetadata,
+      resolver: 'RunAIAgentResolver',
+      block
+    };
+
+    for (const callback of callbacks) {
+      try {
+        await callback(progressUpdate);
+      } catch (error) {
+        console.error(`[ConversationStreamingService] Error executing streaming callback for message ${conversationDetailId}:`, error);
+      }
+    }
+  }
+
+  /**
    * Schedule a reconnection attempt after a delay
    */
   private scheduleReconnection(): void {
@@ -440,6 +506,109 @@ export class ConversationStreamingService implements OnDestroy {
       this.initialized = false; // Reset initialization flag
       this.initialize();
     }, 5000);
+  }
+
+  /**
+   * Get the accumulated, ordered typed content blocks for an in-progress AI message.
+   * Returns the live array (callers must not mutate it). Empty when none have arrived.
+   * @param conversationDetailId - The in-progress message's ConversationDetailID
+   */
+  public getStreamingBlocks(conversationDetailId: string): AgentStreamBlock[] {
+    return this.streamingBlocks.get(conversationDetailId) || [];
+  }
+
+  /**
+   * Accumulate one typed block into the ordered list for a message.
+   *
+   * A `tool-result` block does NOT append — it merges into the most recent
+   * `tool-call` with the same CallID, promoting its Status to complete/error and
+   * setting Detail from the result/error text. This keeps a tool call rendered as
+   * a single evolving row rather than two separate entries. Consecutive `text` /
+   * `thinking` deltas are coalesced into the trailing block of the same Kind so
+   * the renderer sees a growing message rather than a long list of fragments.
+   */
+  private accumulateStreamingBlock(conversationDetailId: string, block: AgentStreamBlock): void {
+    const blocks = this.streamingBlocks.get(conversationDetailId) || [];
+
+    if (block.Kind === 'tool-result') {
+      const target = this.findToolCallForResult(blocks, block.CallID);
+      if (target) {
+        target.Status = block.Error ? 'error' : 'complete';
+        const detail = block.Error ?? block.Result;
+        if (detail != null) {
+          target.Detail = detail;
+        }
+        this.streamingBlocks.set(conversationDetailId, blocks);
+        return;
+      }
+      // No matching call seen yet — store as a degenerate completed call so the
+      // result isn't silently dropped.
+      blocks.push({
+        Kind: 'tool-call',
+        CallID: block.CallID,
+        Name: block.CallID,
+        Status: block.Error ? 'error' : 'complete',
+        Detail: block.Error ?? block.Result,
+      });
+      this.streamingBlocks.set(conversationDetailId, blocks);
+      return;
+    }
+
+    if (block.Kind === 'text' || block.Kind === 'thinking') {
+      const last = blocks[blocks.length - 1];
+      if (last && last.Kind === block.Kind) {
+        last.Content += block.Content;
+        this.streamingBlocks.set(conversationDetailId, blocks);
+        return;
+      }
+    }
+
+    // A tool call has a lifecycle: BaseAgent emits a `running` block when it
+    // starts, then a `complete`/`error` block with the SAME CallID when it
+    // finishes. Update the existing entry in place so it renders as one evolving
+    // chip rather than duplicate rows.
+    if (block.Kind === 'tool-call') {
+      const existing = this.findToolCallForResult(blocks, block.CallID);
+      if (existing) {
+        existing.Status = block.Status;
+        if (block.Label != null) {
+          existing.Label = block.Label;
+        }
+        if (block.Detail != null) {
+          existing.Detail = block.Detail;
+        }
+        if (block.Name) {
+          existing.Name = block.Name;
+        }
+        this.streamingBlocks.set(conversationDetailId, blocks);
+        return;
+      }
+    }
+
+    blocks.push(block);
+    this.streamingBlocks.set(conversationDetailId, blocks);
+  }
+
+  /** Find the most recent in-flight (or any) tool-call block matching a CallID. */
+  private findToolCallForResult(
+    blocks: AgentStreamBlock[],
+    callId: string
+  ): Extract<AgentStreamBlock, { Kind: 'tool-call' }> | undefined {
+    for (let i = blocks.length - 1; i >= 0; i--) {
+      const b = blocks[i];
+      if (b.Kind === 'tool-call' && b.CallID === callId) {
+        return b;
+      }
+    }
+    return undefined;
+  }
+
+  /**
+   * Clear the accumulated blocks for a message. Called on completion so a fresh
+   * run (or the finalized message) starts clean and we don't leak memory.
+   */
+  public clearStreamingBlocks(conversationDetailId: string): void {
+    this.streamingBlocks.delete(conversationDetailId);
   }
 
   /**
@@ -508,6 +677,7 @@ export class ConversationStreamingService implements OnDestroy {
 
     this.callbackRegistry.clear();
     this.recentCompletions.clear();
+    this.streamingBlocks.clear();
     this.completionEvents$.complete();
     this.connectionStatus$.complete();
     this.initialized = false;

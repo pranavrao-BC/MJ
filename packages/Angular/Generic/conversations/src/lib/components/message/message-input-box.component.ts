@@ -35,6 +35,11 @@ export class MessageInputBoxComponent {
   @Input() currentUser?: UserInfo;
   @Input() rows: number = 3;
 
+  // When true, an agent response is in flight: show a STOP button in place of Send.
+  @Input() IsAwaitingResponse: boolean = false;
+  // When true, the user has clicked STOP and cancellation is pending: show "Stopping…".
+  @Input() IsStopping: boolean = false;
+
   // Attachment settings
   @Input() enableAttachments: boolean = true;
   @Input() maxAttachments: number = 10;
@@ -47,6 +52,7 @@ export class MessageInputBoxComponent {
   @Output() attachmentError = new EventEmitter<string>();
   @Output() attachmentClicked = new EventEmitter<PendingAttachment>();
   @Output() artifactPickerRequested = new EventEmitter<void>();
+  @Output() stopClicked = new EventEmitter<void>();
 
   get canSend(): boolean {
     const hasText = this.value.trim().length > 0;
@@ -120,14 +126,25 @@ export class MessageInputBoxComponent {
   }
 
   /**
+   * Stop the in-progress agent run. Emits to the parent which fires the
+   * CancelAIAgentRun mutation. No-op once a cancel is already pending.
+   */
+  onStopClick(): void {
+    if (this.IsStopping) {
+      return;
+    }
+    this.stopClicked.emit();
+  }
+
+  /**
    * Handle clicks on the container - focus the mention editor
    * Only moves cursor to end if clicking outside the contentEditable area
    */
   onContainerClick(event: MouseEvent): void {
     const target = event.target as HTMLElement;
 
-    // Don't handle clicks on the send button
-    if (target.closest('.send-button-icon')) {
+    // Don't handle clicks on the send/stop button
+    if (target.closest('.send-button-icon') || target.closest('.stop-button-icon')) {
       return;
     }
 

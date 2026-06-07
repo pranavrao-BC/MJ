@@ -37,7 +37,6 @@ import { VoiceCascadedConfig } from '../types/channel-config';
 import { BaseVAD, VADEvent } from '../vad/BaseVAD';
 import { BaseTurnDetector, TurnEvent } from '../turn-detector/BaseTurnDetector';
 import { InterruptReason } from '../interrupt/InterruptChannel';
-import { MessageFieldExtractor } from '../_internal/MessageFieldExtractor';
 
 /**
  * Bundle of resolved per-session provider instances. Built once at the top of
@@ -487,20 +486,18 @@ export class CascadedChannelEngine extends BaseChannelEngine {
 
     /**
      * Call `BaseAgent.Execute()` with the user's transcribed text as a single
-     * chat message. The token stream from the underlying LLM is filtered
-     * through `MessageFieldExtractor` so ONLY the characters inside the
-     * `message` field of each step's LoopAgentResponse envelope reach the
-     * TTS pump. Without this filter, the LLM's raw JSON tokens (`{`, key
-     * names, `reasoning`, `nextStep` payload, etc.) would all be spoken —
-     * the original "agent talks JSON at you" bug.
+     * chat message. `BaseAgent` now streams the agent's prose as native `text`
+     * {@link AgentStreamBlock}s — it cracks the `message` field out of each
+     * step's `LoopAgentResponse` JSON envelope AT THE SOURCE and re-emits it as
+     * a typed block. So this engine consumes `chunk.block` of `Kind: 'text'`
+     * and feeds `block.Content` to the TTS pump / transcript / event stream.
+     * It does NOT parse JSON — the raw envelope never reaches the channel path.
      *
-     * Per-step semantics: `BaseAgent` forwards `onStreaming` to every
-     * prompt it runs (planner, sub-agent, final response). Each prompt
-     * step emits its own self-contained JSON envelope. We track the
-     * incoming `stepEntityId` and reset the extractor on step boundaries
-     * so the parser starts fresh for each envelope. The user hears the
-     * `message` from every step in order — useful for voice progress
-     * feedback during multi-step runs.
+     * Per-step semantics: `BaseAgent` forwards `onStreaming` for every prompt
+     * it runs (planner, sub-agent, final response). Each step's prose arrives
+     * as `text` blocks in order — useful for voice progress feedback during
+     * multi-step runs. Tool-call blocks (delegations/actions) are surfaced
+     * separately for the live running→done lifecycle widget.
      */
     protected async runAgent(
         ctx: ChannelRunContext,
@@ -555,16 +552,13 @@ export class CascadedChannelEngine extends BaseChannelEngine {
             ctx.SessionID
         );
 
-        // The streaming JSON parser normalizes the loop agent's per-step JSON
-        // envelope down to just the `message` value. It always drives the
-        // transcript event stream (widget liveness). When `eventStream` is
-        // provided (the `StreamToTTS` path), each extracted chunk is ALSO
-        // emitted as a normalized `TextDelta` so the caller can pump it to TTS
-        // concurrently with execution. The extractor lives here, behind the
-        // typed `AgentStreamEvent` boundary — it is the conductor-path
-        // normalizer, not the engine's streaming contract.
-        const extractor = new MessageFieldExtractor('message');
-        let lastStepEntityId: string | undefined;
+        // BaseAgent emits the agent's prose as native `text` AgentStreamBlocks
+        // (it cracks the loop agent's `message` field out of the JSON envelope at
+        // the source). This engine just consumes those typed blocks — feeding
+        // `block.Content` to the transcript (widget liveness) and, when
+        // `eventStream` is provided (the `StreamToTTS` path), to a normalized
+        // `TextDelta` so the caller can pump it to TTS concurrently with execution.
+        // No JSON parsing happens here.
         eventStream?.EmitTurnStart();
 
         // Channel context — surfaced to the prompt template via
@@ -601,21 +595,37 @@ export class CascadedChannelEngine extends BaseChannelEngine {
                 channelContext,
             },
             onStreaming: (chunk) => {
-                const stepId = (chunk as { stepEntityId?: string }).stepEntityId;
-                if (stepId && stepId !== lastStepEntityId) {
-                    lastStepEntityId = stepId;
-                    extractor.Reset();
+                const block = chunk.block;
+                if (!block) {
+                    return;
                 }
-                if (chunk.content && chunk.content.length > 0) {
-                    const partial = extractor.Feed(chunk.content);
-                    if (partial.length > 0) {
+                // Native `text` block — the agent's prose, already extracted from
+                // the JSON envelope at the source. Feed it to the transcript (widget
+                // liveness) and, on the StreamToTTS path, to the TTS event stream.
+                if (block.Kind === 'text') {
+                    const prose = block.Content;
+                    if (prose.length > 0) {
                         ctx.OnTranscript?.({
                             Kind: 'assistant-text',
-                            Text: partial,
+                            Text: prose,
                             IsFinal: false,
                         });
-                        eventStream?.EmitTextDelta(partial);
+                        eventStream?.EmitTextDelta(prose);
                     }
+                    return;
+                }
+                // Surface the run's NATIVE typed tool-call blocks (the same ones
+                // BaseAgent emits to the chat) to the widget so delegations/actions
+                // show a live running→done lifecycle in voice too.
+                if (block.Kind === 'tool-call') {
+                    ctx.OnTranscript?.({
+                        Kind: 'tool-call',
+                        CallID: block.CallID,
+                        ToolName: block.Name,
+                        Label: block.Label ?? block.Name,
+                        Status: block.Status,
+                        Detail: block.Detail,
+                    });
                 }
             },
         };

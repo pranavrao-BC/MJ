@@ -2,14 +2,20 @@
  * `MessageFieldExtractor` — streaming JSON path filter that emits ONLY the
  * characters inside the value of a top-level string field (default `message`).
  *
- * Built for the voice channel runtime. MJ loop-agent prompts return JSON
- * envelopes like:
+ * MJ loop-agent prompts stream a JSON envelope (`LoopAgentResponse`) like:
  *
  *   { "taskComplete": true, "message": "Hi there!", "reasoning": "...", ... }
  *
- * For TTS we want to speak ONLY the `message` value — never the surrounding
- * JSON syntax, never `reasoning`, never `nextStep`. Naively piping LLM tokens
- * to TTS spoke the entire JSON envelope, which is the bug this class fixes.
+ * Downstream consumers (chat UI, voice TTS) want the human-readable prose —
+ * the `message` value — NOT the surrounding JSON syntax, `reasoning`, or
+ * `nextStep`. This extractor lets `BaseAgent` crack the prose out of the
+ * partial JSON AS IT STREAMS and re-emit it as a native `text`
+ * {@link AgentStreamBlock}, so nothing downstream ever parses JSON.
+ *
+ * This is the Loop agent's "legacy JSON → typed blocks" adapter, living at
+ * the agent layer (the source of the stream). It used to live in the voice
+ * channel runtime; it was relocated here so the prose is a `text` block at
+ * the source and the channel/voice path consumes typed blocks only.
  *
  * Implementation: a small char-by-char state machine. Tracks string boundaries
  * (with full escape handling including `\uXXXX`), object/array nesting depth,
@@ -17,27 +23,26 @@
  * inside the value of a key matching `targetKey` at depth 1.
  *
  * Why hand-written instead of a SAX library (clarinet/jsonparse): zero deps,
- * runs in browser + Node, ~150 lines. The voice runtime ships to both.
+ * runs in browser + Node, ~150 lines.
  *
  * Usage:
  *
  *   const ex = new MessageFieldExtractor('message');
  *   for (const chunk of tokenStream) {
- *     const spoken = ex.Feed(chunk);
- *     if (spoken.length > 0) tts.Push(spoken);
+ *     const prose = ex.Feed(chunk);
+ *     if (prose.length > 0) emit({ Kind: 'text', Content: prose });
  *   }
  *   // Reset between LLM responses (e.g. between agent steps):
  *   ex.Reset();
  *
- * Limitations (acceptable for the prototype):
+ * Limitations (acceptable):
  *   - Strict JSON only — no JSON5, no comments.
  *   - Only the first matching `targetKey` value per envelope is emitted. If
  *     the agent's JSON contains `message` twice at depth 1 (it shouldn't),
- *     only the first is spoken.
+ *     only the first is emitted.
  *   - Surrogate-pair `\uXXXX\uYYYY` sequences emit each half independently;
- *     for BMP characters this is fine and TTS providers re-assemble. Astral
- *     plane glyphs in the spoken message would render incorrectly — vanishingly
- *     rare for English speech output.
+ *     for BMP characters this is fine. Astral-plane glyphs would render
+ *     incorrectly — vanishingly rare for prose.
  *   - If the stream contains leading non-JSON (e.g. ```json code fence), it
  *     is skipped — we wait for the first `{`.
  */
@@ -59,9 +64,10 @@ export class MessageFieldExtractor {
     private unicodeHex = '';
 
     /**
-     * Reset state. Call between LLM responses (e.g. when `chunk.stepEntityId`
-     * changes for loop-agent multi-step runs). Each agent step's JSON envelope
-     * is independent — keys, depth, escape state all start fresh.
+     * Reset state. Call between LLM responses (e.g. when the prompt step's
+     * `stepEntityId` changes for loop-agent multi-step runs). Each agent
+     * step's JSON envelope is independent — keys, depth, escape state all
+     * start fresh.
      */
     public Reset(): void {
         this.mode = 'before-start';
@@ -80,7 +86,7 @@ export class MessageFieldExtractor {
     /**
      * Feed a chunk of input. Returns the concatenation of characters from
      * `chunk` that fall inside the target field's value. Returns `''` if
-     * the chunk contributed no spoken characters.
+     * the chunk contributed no characters.
      */
     public Feed(chunk: string): string {
         if (this.finishedTargetValue) return '';

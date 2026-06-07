@@ -18,6 +18,7 @@ import { AgentPayloadChangeRequest } from './agent-payload-change-request';
 import { AgentScratchpad } from './agent-scratchpad';
 import { AIAPIKey } from '@memberjunction/ai';
 import { AgentResponseForm } from './response-forms';
+import { AgentStreamBlock } from './agent-stream-events';
 import { ActionParam } from '@memberjunction/actions-base';
 import { ActionableCommand, AutomaticCommand } from './ui-commands';
 import { AgentRequestAssignmentStrategy } from './assignment-strategy';
@@ -724,6 +725,14 @@ export type AgentExecutionStreamingCallback = (chunk: {
     stepEntityId?: string;
     /** Model name producing this content (for prompt steps) */
     modelName?: string;
+    /**
+     * Strongly-typed content block for this chunk — the native block-streaming
+     * representation. When present, downstream renders by `block.Kind` instead of
+     * treating `content` as opaque text. `content` stays populated for back-compat
+     * (text blocks mirror it). Interim only; the run's terminal result is still
+     * `LoopAgentResponse` / `ExecuteAgentResult`.
+     */
+    block?: AgentStreamBlock;
 }) => void;
 
 /**
@@ -757,6 +766,75 @@ export interface InputArtifact {
     deliveryMode?: 'Inline' | 'ToolsOnly';
     /** Per-instance override that forces ToolsOnly regardless of type default. */
     forceToolsOnly?: boolean;
+}
+
+/**
+ * A single base64-encoded audio frame carried by a {@link RealtimeAgentTransport}.
+ *
+ * `Data` is base64 (not a raw `Uint8Array`) so the frame survives JSON/WebSocket
+ * transport between the audio carrier and the agent run with no binary marshaling.
+ * PCM frames are little-endian 16-bit signed unless `MediaType` says otherwise.
+ *
+ * Kept as a standalone structural type so this package stays dependency-free —
+ * it deliberately does NOT reuse `AudioFrame` from `@memberjunction/ai`.
+ *
+ * @since 5.40.0
+ */
+export interface RealtimeAudioFrame {
+    /** Base64-encoded audio payload. */
+    Data: string;
+    /** Sample rate of the audio payload, in Hz (e.g. 16000, 24000). */
+    SampleRateHz: number;
+    /** Number of interleaved audio channels (1 = mono). */
+    ChannelCount: number;
+    /** Container/codec, e.g. 'audio/pcm', 'audio/opus', 'audio/mulaw'. Defaults to PCM. */
+    MediaType?: string;
+}
+
+/**
+ * A non-audio control signal flowing from the carrier into the realtime session:
+ * a typed user text turn, an image (e.g. a whiteboard snapshot), or session end.
+ *
+ * `Kind` is left as an open `string` (rather than a closed union) so the carrier
+ * and the agent type can agree on signals additively without a breaking change to
+ * this seam. The realtime agent type interprets the kinds it knows
+ * (`'user-text'`, `'user-canvas-snapshot'`, `'session-end'`) and ignores the rest.
+ *
+ * @since 5.40.0
+ */
+export interface RealtimeControlEvent {
+    /** Discriminator, e.g. 'user-text', 'user-canvas-snapshot', 'session-end'. */
+    Kind: string;
+    /** Text payload for text turns. */
+    Text?: string;
+    /** Base64-encoded image payload for image/snapshot events. */
+    ImageBase64?: string;
+    /** MIME type for the image payload (e.g. 'image/png'). */
+    MediaType?: string;
+}
+
+/**
+ * Bidirectional audio transport seam for realtime (speech-to-speech) agent types.
+ *
+ * Structurally typed so `ai-core-plus` takes no dependency on the audio runtime.
+ * The carrier (voice widget bridge, phone bridge, test harness) implements this;
+ * the realtime agent type drives it:
+ *   - reads inbound user audio from {@link AudioFramesIn}
+ *   - writes model audio out via {@link SendAudioFrame}
+ *   - reads text/image/session-end signals from {@link ControlEventsIn}
+ *
+ * Both async-iterables complete (return done) when the carrier disconnects, which
+ * the agent type treats as session end.
+ *
+ * @since 5.40.0
+ */
+export interface RealtimeAgentTransport {
+    /** Inbound user microphone audio. Completes when the carrier disconnects. */
+    AudioFramesIn: AsyncIterable<RealtimeAudioFrame>;
+    /** Push a frame of model-generated audio back out to the carrier. */
+    SendAudioFrame(frame: RealtimeAudioFrame): void;
+    /** Inbound non-audio control signals (user text, images, session-end). */
+    ControlEventsIn: AsyncIterable<RealtimeControlEvent>;
 }
 
 /**
@@ -806,6 +884,23 @@ export interface InputArtifact {
 export type ExecuteAgentParams<TContext = any, P = any, TAgentTypeParams = unknown> = {
     /** The agent entity to execute, containing all metadata and configuration */
     agent: MJAIAgentEntityExtended;
+    /**
+     * Optional bidirectional audio transport for realtime agent types (S2S).
+     * Absent for normal (text-only) runs.
+     *
+     * Realtime agent types (e.g. `RealtimeAgentType`) use this seam to bridge a
+     * speech-to-speech model session to whatever carries audio for the run
+     * (a voice widget over WebSocket, a phone bridge, a test harness):
+     *   - inbound user audio is consumed from `AudioFramesIn`
+     *   - model audio is pushed out via `SendAudioFrame`
+     *   - text / image / session-end signals arrive on `ControlEventsIn`
+     *
+     * Typed structurally so this package takes NO new dependency on the audio
+     * runtime — any object satisfying this shape (base64-framed PCM in/out plus
+     * a control-event stream) can be passed. The transport owns frame transport
+     * and encoding; the agent type owns the model session and tool routing.
+     */
+    realtimeTransport?: RealtimeAgentTransport;
     /** Array of chat messages representing the conversation history */
     conversationMessages: ChatMessage[];
     /** Optional user context for permission checking and personalization */

@@ -9,13 +9,16 @@ import {
   OnInit,
   OnChanges,
   SimpleChanges,
-  DoCheck
+  DoCheck,
+  inject
 } from '@angular/core';
+import { DomSanitizer, SafeHtml } from '@angular/platform-browser';
 import { MJConversationDetailEntity, MJConversationEntity, MJArtifactEntity, MJArtifactVersionEntity, MJTaskEntity, RatingJSON } from '@memberjunction/core-entities';
 import { UserInfo, RunView, CompositeKey, KeyValuePair } from '@memberjunction/core';
 import { BaseAngularComponent } from '@memberjunction/ng-base-types';
 import { AIEngineBase } from '@memberjunction/ai-engine-base';
-import { AgentResponseForm, FormQuestion, ChoiceQuestionType, ActionableCommand, AutomaticCommand, ConversationUtility, MJAIAgentRunEntityExtended } from '@memberjunction/ai-core-plus';
+import { AgentResponseForm, FormQuestion, ChoiceQuestionType, ActionableCommand, AutomaticCommand, ConversationUtility, MJAIAgentRunEntityExtended, AgentStreamBlock } from '@memberjunction/ai-core-plus';
+import { ConversationStreamingService } from '../../services/conversation-streaming.service';
 import { FormResponseUtils } from '@memberjunction/ng-forms';
 import { MentionParserService } from '../../services/mention-parser.service';
 import { MentionAutocompleteService } from '../../services/mention-autocomplete.service';
@@ -109,6 +112,22 @@ export class MessageItemComponent extends BaseAngularComponent implements OnInit
   private _stableDisplayMessage: string = '';
   private _stableIsInProgressAIMessage: boolean = false;
 
+  /**
+   * Snapshot of the live typed streaming blocks for THIS message, refreshed in
+   * ngDoCheck. Only populated while the message is an in-progress AI message;
+   * once it completes the array empties and the finalized message.Message renders
+   * instead (no double-render). Read by the template.
+   */
+  private _stableStreamingBlocks: AgentStreamBlock[] = [];
+
+  // Streaming service (singleton) owns the per-message block accumulator.
+  private readonly streamingService = inject(ConversationStreamingService);
+  private readonly sanitizer = inject(DomSanitizer);
+
+  // Memoize sanitized HTML so the template gets a stable SafeHtml reference per
+  // raw html string (avoids re-sanitizing on every CD pass + NG0100 churn).
+  private _sanitizedHtmlCache = new Map<string, SafeHtml>();
+
   // Agent run details
   public isAgentDetailsExpanded: boolean = false;
   public detailTasks: MJTaskEntity[] = [];
@@ -179,6 +198,12 @@ export class MessageItemComponent extends BaseAngularComponent implements OnInit
     this._messageClasses = this.buildMessageClasses();
     this._stableIsInProgressAIMessage = this.isAIMessage && currentStatus === 'In-Progress';
     this._stableDisplayMessage = this.computeDisplayMessage();
+
+    // Snapshot live streaming blocks ONLY while in-progress; otherwise empty so the
+    // finalized message renders without double-drawing the streamed blocks.
+    this._stableStreamingBlocks = this._stableIsInProgressAIMessage && this.message.ID
+      ? this.streamingService.getStreamingBlocks(this.message.ID)
+      : [];
   }
 
   ngAfterViewInit() {
@@ -375,6 +400,54 @@ export class MessageItemComponent extends BaseAngularComponent implements OnInit
 
   public get displayMessage(): string {
     return this._stableDisplayMessage;
+  }
+
+  /**
+   * The accumulated typed streaming blocks for this in-progress message, in arrival
+   * order. Empty unless this is an in-progress AI message that is actively streaming.
+   * The template switches on each block's `Kind` to render it.
+   */
+  public get streamingBlocks(): AgentStreamBlock[] {
+    return this._stableStreamingBlocks;
+  }
+
+  /** Whether there are live streaming blocks to render for this message. */
+  public get hasStreamingBlocks(): boolean {
+    return this._stableStreamingBlocks.length > 0;
+  }
+
+  /** Stable track key for the @for over streaming blocks. */
+  public trackStreamingBlock(index: number, block: AgentStreamBlock): string {
+    if (block.Kind === 'tool-call') {
+      return `tool:${block.CallID}`;
+    }
+    return `${block.Kind}:${index}`;
+  }
+
+  /** Font Awesome icon class for a tool-call block's current status. */
+  public toolCallIconClass(block: Extract<AgentStreamBlock, { Kind: 'tool-call' }>): string {
+    switch (block.Status) {
+      case 'complete':
+        return 'fa-solid fa-circle-check';
+      case 'error':
+        return 'fa-solid fa-circle-xmark';
+      default:
+        return 'fa-solid fa-spinner fa-spin';
+    }
+  }
+
+  /**
+   * Sanitize an agent-authored HTML block for binding via [innerHTML]. Memoized
+   * by raw string so repeated CD passes reuse the same SafeHtml reference.
+   */
+  public sanitizedBlockHtml(html: string): SafeHtml {
+    const cached = this._sanitizedHtmlCache.get(html);
+    if (cached) {
+      return cached;
+    }
+    const safe = this.sanitizer.bypassSecurityTrustHtml(html);
+    this._sanitizedHtmlCache.set(html, safe);
+    return safe;
   }
 
   /**

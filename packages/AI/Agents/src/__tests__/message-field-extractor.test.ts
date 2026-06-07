@@ -1,7 +1,8 @@
 /**
  * Tests for `MessageFieldExtractor` — the streaming JSON path filter that
- * pulls only the `message` field's value out of a streaming LoopAgentResponse
- * for TTS consumption.
+ * pulls only the `message` field's value out of a streaming LoopAgentResponse.
+ * BaseAgent uses this to re-emit the agent's prose as native `text`
+ * AgentStreamBlocks at the source of the stream.
  *
  * Key invariants under test:
  *   - Only characters inside the value of the top-level `message` field are
@@ -12,7 +13,7 @@
  *   - Reset() restores the parser for the next agent step's envelope.
  */
 import { describe, it, expect } from 'vitest';
-import { MessageFieldExtractor } from '../_internal/MessageFieldExtractor';
+import { MessageFieldExtractor } from '../_internal/message-field-extractor';
 
 function feedAll(input: string, chunkSize = input.length): string {
     const ex = new MessageFieldExtractor('message');
@@ -37,7 +38,7 @@ describe('MessageFieldExtractor', () => {
 
         it('ignores message keys nested inside other objects', () => {
             // Only the depth-1 message field counts. A nested object's "message"
-            // key (e.g. inside nextStep.subAgent) must NOT be spoken.
+            // key (e.g. inside nextStep.subAgent) must NOT be emitted.
             const json = '{"nextStep":{"subAgent":{"message":"sub-agent instructions, do not speak"}},"message":"top level message"}';
             expect(feedAll(json)).toBe('top level message');
         });

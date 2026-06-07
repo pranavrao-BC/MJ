@@ -20,10 +20,13 @@
     [acceptedFileTypes]="acceptedFileTypes"
     [currentUser]="currentUser"
     [rows]="3"
+    [IsAwaitingResponse]="IsAwaitingResponse"
+    [IsStopping]="IsStopping"
     [(value)]="messageText"
     (textSubmitted)="onTextSubmitted($event)"
     (attachmentsChanged)="onAttachmentsChanged($event)"
     (attachmentError)="onAttachmentError($event)"
-    (artifactPickerRequested)="onArtifactPickerRequested()">
+    (artifactPickerRequested)="onArtifactPickerRequested()"
+    (stopClicked)="CancelAgentRun()">
   </mj-message-input-box>
 </div>

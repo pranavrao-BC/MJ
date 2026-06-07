@@ -1568,3 +1568,74 @@
     width: 100%;
   }
 }
+
+/* ============================================================
+   Live typed streaming blocks (in-progress AI message only)
+   ============================================================ */
+.message-stream-blocks {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.stream-block {
+  display: block;
+}
+
+/* Reasoning / thinking — de-emphasized, smaller, muted */
+.stream-block.stream-thinking {
+  font-size: 0.85em;
+  color: var(--mj-text-muted);
+  font-style: italic;
+  white-space: pre-wrap;
+  line-height: 1.4;
+}
+
+/* In-flight tool / action / sub-agent call */
+.stream-block.stream-tool-call {
+  display: flex;
+  flex-direction: column;
+  gap: 2px;
+  padding: 6px 10px;
+  border: 1px solid var(--mj-border-subtle);
+  border-radius: var(--mj-radius-md, 6px);
+  background: var(--mj-bg-surface-card);
+}
+
+.stream-tool-call .tool-call-row {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  font-size: 0.9em;
+  color: var(--mj-text-secondary);
+}
+
+.stream-tool-call .tool-call-row i {
+  color: var(--mj-brand-primary);
+}
+
+.stream-tool-call.is-complete .tool-call-row i {
+  color: var(--mj-status-success);
+}
+
+.stream-tool-call.is-error .tool-call-row i {
+  color: var(--mj-status-error);
+}
+
+.stream-tool-call .tool-call-label {
+  font-weight: 500;
+}
+
+.stream-tool-call .tool-call-detail {
+  font-size: 0.8em;
+  color: var(--mj-text-muted);
+  padding-left: 24px;
+  white-space: pre-wrap;
+  word-break: break-word;
+}
+
+/* Agent-authored rich markup (SVG-in-HTML diagrams/whiteboard) */
+.stream-block.stream-html {
+  max-width: 100%;
+  overflow-x: auto;
+}

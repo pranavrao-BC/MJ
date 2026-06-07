@@ -47,7 +47,7 @@
   },
   {
     "fields": {
-      "AIAgentID": "@lookup:MJ: AI Agents.Name=Sage",
+      "AIAgentID": "@lookup:MJ: AI Agents.Name=Sage Voice",
       "AIAgentChannelID": "@lookup:MJ: AI Agent Channels.Name=voice-realtime",
       "Sequence": 2,
       "Status": "Active",
@@ -65,8 +65,8 @@
       "ID": "D3B9EE9B-F75F-452B-B48D-D8D6B12D42FD"
     },
     "sync": {
-      "lastModified": "2026-06-07T14:01:28.827Z",
-      "checksum": "d9c82fea2bf840d74d2bc817eb20ccd5d014a9b3e6e3db30bcb6a57f561e09c0"
+      "lastModified": "2026-06-07T23:09:16.833Z",
+      "checksum": "b8a1a3f5842e6093e857e6d138dc1de768d11860f2e9bce1aadef2c5ffb61fd8"
     }
   }
 ]

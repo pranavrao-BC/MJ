@@ -149,6 +149,16 @@ export class MessageInputComponent extends BaseAngularComponent implements OnIni
   @Input()
   set inProgressMessageIds(value: string[] | undefined) {
     this._inProgressMessageIds = value;
+    // Prune optimistic "stopping" entries for messages that have resolved and
+    // dropped out of the in-progress set, so stale IDs don't accumulate.
+    if (this.stoppingMessageIds.size > 0) {
+      const stillInProgress = new Set(value ?? []);
+      for (const id of [...this.stoppingMessageIds]) {
+        if (!stillInProgress.has(id)) {
+          this.stoppingMessageIds.delete(id);
+        }
+      }
+    }
     // React immediately when input changes (after component initialized)
     // This ensures callbacks are registered without relying on ngOnChanges timing
     if (this.streamingService && value && value.length > 0) {
@@ -189,6 +199,11 @@ export class MessageInputComponent extends BaseAngularComponent implements OnIni
 
   // Track pending attachments from the input box
   private pendingAttachments: PendingAttachment[] = [];
+
+  // ConversationDetailIDs for which the user has already requested cancellation.
+  // Used to optimistically reflect "Stopping…" in the STOP button until the
+  // in-progress message resolves and drops out of inProgressMessageIds.
+  private stoppingMessageIds = new Set<string>();
 
   private engine = ConversationEngine.Instance;
 
@@ -337,6 +352,20 @@ export class MessageInputComponent extends BaseAngularComponent implements OnIni
           return;
         }
 
+        // Typed streaming blocks (text/thinking/tool-call/html) render live from
+        // the streaming service's per-message accumulator (see MessageItemComponent).
+        // For block-bearing chunks we only refresh the UI — we do NOT clobber
+        // message.Message with the (often empty) partial content string, since the
+        // block view is the source of truth until the run completes and the server
+        // finalizes message.Message.
+        if (progress.block) {
+          this.messageSent.emit(message);
+          if (progress.message) {
+            this.activeTasks.updateStatusByConversationDetailId(message.ID, progress.message);
+          }
+          return;
+        }
+
         // Default: plain message (used by RunAIAgentResolver and TaskOrchestrator without step info)
         message.Message = progress.message;
 
@@ -385,6 +414,75 @@ export class MessageInputComponent extends BaseAngularComponent implements OnIni
 
   get canSend(): boolean {
     return !this.disabled && !this.isSending && this.messageText.trim().length > 0;
+  }
+
+  /**
+   * True while an agent response is in flight for this conversation — i.e. there
+   * is at least one in-progress AI message. Drives the STOP button affordance in
+   * the input box (replacing Send while awaiting a reply).
+   */
+  public get IsAwaitingResponse(): boolean {
+    return !!this.inProgressMessageIds && this.inProgressMessageIds.length > 0;
+  }
+
+  /**
+   * True once the user has clicked STOP for the currently in-progress run(s) but
+   * the message has not yet resolved. Used to show "Stopping…" and disable the
+   * button so it can't be clicked repeatedly.
+   */
+  public get IsStopping(): boolean {
+    if (!this.inProgressMessageIds) {
+      return false;
+    }
+    // Stopping only if EVERY currently in-progress message has a pending cancel.
+    return this.inProgressMessageIds.length > 0 &&
+      this.inProgressMessageIds.every(id => this.stoppingMessageIds.has(id));
+  }
+
+  /**
+   * Cancel the in-progress agent run(s) for this conversation.
+   *
+   * Fires the `CancelAIAgentRun` mutation for each in-progress AI message
+   * (its ConversationDetailID is the cancellation key). Optimistically marks
+   * those IDs as "stopping" so the button reflects the request immediately;
+   * the actual message status flips to Complete/Error via the existing
+   * streaming/completion path, which removes the ID from inProgressMessageIds.
+   */
+  public async CancelAgentRun(): Promise<void> {
+    const ids = this.inProgressMessageIds;
+    if (!ids || ids.length === 0) {
+      return;
+    }
+
+    const provider = this.ProviderToUse as GraphQLDataProvider;
+    if (!provider) {
+      console.warn('⚠️ GraphQLDataProvider not available — cannot cancel agent run');
+      return;
+    }
+
+    const mutation = `
+      mutation CancelAIAgentRun($conversationDetailId: String!) {
+        CancelAIAgentRun(conversationDetailId: $conversationDetailId)
+      }
+    `;
+
+    for (const conversationDetailId of ids) {
+      // Skip ones we've already asked to cancel.
+      if (this.stoppingMessageIds.has(conversationDetailId)) {
+        continue;
+      }
+      // Optimistic: reflect the request right away.
+      this.stoppingMessageIds.add(conversationDetailId);
+
+      try {
+        await provider.ExecuteGQL(mutation, { conversationDetailId });
+      } catch (error) {
+        console.error(`❌ Failed to cancel agent run for ${conversationDetailId}:`, error);
+        // Roll back optimistic state so the user can retry.
+        this.stoppingMessageIds.delete(conversationDetailId);
+        this.toastService.error('Failed to stop the agent. Please try again.');
+      }
+    }
   }
 
   /**

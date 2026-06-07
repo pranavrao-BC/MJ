@@ -58,13 +58,15 @@ import {
     ClientToolResultSummary,
     ClientToolMetadata,
     InputArtifact,
-    AgentPipelineRequest
+    AgentPipelineRequest,
+    AgentStreamBlock
 } from '@memberjunction/ai-core-plus';
 import { MJActionEntityExtended, ActionResult, ActionParam, AIDirective } from '@memberjunction/actions-base';
 import { AgentRunner } from './AgentRunner';
 import { PayloadManager, PayloadManagerResult, PayloadChangeResultSummary } from './PayloadManager';
 import { ScratchpadManager } from './ScratchpadManager';
 import { ArtifactToolManager, ArtifactToolCall, StoredToolResult } from './ArtifactToolManager';
+import { MessageFieldExtractor } from './_internal/message-field-extractor';
 import {
     PipelineExecutor,
     PipelineToolRegistry,
@@ -1435,7 +1437,19 @@ export class BaseAgent {
             // is of a different type.
             //const normalizedFinalPayload = this.normalizePayloadForParent(finalPayload, params.agent, params.parentRun?.AgentID);
 
-            return await this.finalizeAgentRun<R>(executionResult.finalStep, finalPayload, params.contextUser);
+            // Stream the run's FINAL user-facing message as a native `text` block.
+            // This is the common case the per-decision emit misses: a run that ends
+            // with `taskComplete` resolves to a 'Success' finalStep (not 'Chat'), so
+            // its answer never streamed as a block. 'Chat' steps already streamed
+            // their message at decision time via `emitNextStepBlocks`, so skip those
+            // here to avoid double-emitting. This is what voice TTS / block consumers
+            // speak; the terminal result is still the run's `LoopAgentResponse`.
+            const finalStep = executionResult.finalStep;
+            if (finalStep.step !== 'Chat' && finalStep.message && finalStep.message.length > 0) {
+                this.emitStreamBlock(params, { Kind: 'text', Content: finalStep.message });
+            }
+
+            return await this.finalizeAgentRun<R>(finalStep, finalPayload, params.contextUser);
         } catch (error) {
             // Check if error is due to cancellation
             if (params.cancellationToken?.aborted || error.message === 'Cancelled during execution') {
@@ -4778,6 +4792,10 @@ The context is now within limits. Please retry your request with the recovered c
         contextMessage?: ChatMessage,
         stepCount: number = 0
     ): Promise<ExecuteAgentResult<SR>> {
+        // Stable per-call tool-call ID: the sub-agent step entity uniquely
+        // identifies this delegation. Used for running + finish blocks (and the
+        // catch path), so declare it outside the try.
+        const toolCallId = stepEntity.ID;
         try {
             this.logStatus(`🤖 Executing sub-agent '${subAgentRequest.name}'`, true, params);
 
@@ -4805,6 +4823,10 @@ The context is now within limits. Please retry your request with the recovered c
             }
 
             const parentStepCountsToPass = [...this._parentStepCounts, stepCount + 1];
+
+            this.emitToolCallBlock(params, toolCallId, subAgentRequest.name, 'running', stepEntity.ID, {
+                label: `Delegating to ${subAgentRequest.name}…`
+            });
 
             // Filter action changes for sub-agent propagation
             const subAgentActionChanges = this.filterActionChangesForSubAgent(params.actionChanges);
@@ -4853,10 +4875,29 @@ The context is now within limits. Please retry your request with the recovered c
             else {
                 this.logStatus(`Sub-agent '${subAgentRequest.name}' failed: ${result.agentRun?.ErrorMessage || 'Unknown error'}`);
             }
-            
+
+            this.emitToolCallBlock(
+                params,
+                toolCallId,
+                subAgentRequest.name,
+                result.success ? 'complete' : 'error',
+                stepEntity.ID,
+                {
+                    label: `Delegating to ${subAgentRequest.name}…`,
+                    detail: result.success
+                        ? (result.agentRun?.Status === 'Cancelled' ? 'Cancelled' : 'Completed')
+                        : (result.agentRun?.ErrorMessage ?? 'Sub-agent failed')
+                }
+            );
+
             // Return the full result for tracking
             return result;
         } catch (error) {
+            this.emitToolCallBlock(params, toolCallId, subAgentRequest.name, 'error', stepEntity.ID, {
+                label: `Delegating to ${subAgentRequest.name}…`,
+                detail: error.message
+            });
+
             this.logError(error, {
                 category: 'SubAgentExecution',
                 metadata: {
@@ -6200,8 +6241,117 @@ The context is now within limits. Please retry your request with the recovered c
     }
 
     /**
+     * Emits a strongly-typed content {@link AgentStreamBlock} over the existing
+     * `onStreaming` rail. Additive: it rides the same callback as raw token
+     * streaming but carries a typed `block` (and an empty `content`, so existing
+     * text-accumulating consumers are unaffected). Emitted only at CLEAN semantic
+     * points where the agent already holds structured data (a decided chat
+     * message, an action/sub-agent invocation) — never from raw in-flight prompt
+     * tokens (which for Loop agents are partial `LoopAgentResponse` JSON).
+     *
+     * @private
+     */
+    private emitStreamBlock(
+        params: ExecuteAgentParams,
+        block: AgentStreamBlock,
+        stepEntityId?: string
+    ): void {
+        params.onStreaming?.({
+            content: '',
+            isComplete: false,
+            block,
+            stepType: 'prompt',
+            stepEntityId
+        });
+    }
+
+    /**
+     * Translates a freshly-decided, validated next step into strongly-typed
+     * content {@link AgentStreamBlock}s and emits them over `onStreaming`.
+     *
+     * Only the `Chat` decision is surfaced here, as a single `text` block
+     * carrying the clean prose message. Tool calls (`Actions` and `Sub-Agent`)
+     * are NOT emitted at this decision point — their full lifecycle (`running`
+     * → `complete`/`error`) is emitted co-located with execution (see
+     * {@link emitToolCallBlock}) so the start and finish blocks always share a
+     * single, self-consistent `CallID`. No-op when no streaming callback is
+     * registered.
+     *
+     * @private
+     */
+    private emitNextStepBlocks<P = any>(
+        params: ExecuteAgentParams,
+        nextStep: BaseAgentNextStep<P>,
+        stepEntityId: string
+    ): void {
+        if (!params.onStreaming) {
+            return;
+        }
+
+        switch (nextStep.step) {
+            case 'Chat': {
+                const message = nextStep.message;
+                if (message && message.length > 0) {
+                    this.emitStreamBlock(params, { Kind: 'text', Content: message }, stepEntityId);
+                }
+                break;
+            }
+            default:
+                // No clean block to emit at the decision point for other step
+                // kinds. Actions / Sub-Agent tool-call lifecycle blocks are
+                // emitted at their execution sites (emitToolCallBlock).
+                break;
+        }
+    }
+
+    /**
+     * Emits a `tool-call` lifecycle {@link AgentStreamBlock} for an action or
+     * sub-agent invocation. Called twice per invocation — once with
+     * `Status:'running'` just before execution and once with
+     * `Status:'complete' | 'error'` just after — using the SAME `callId` both
+     * times so the client merges the two into a single tool-call entry.
+     *
+     * `detail` is truncated to keep the stream lightweight. No-op when no
+     * streaming callback is registered.
+     *
+     * @private
+     */
+    private emitToolCallBlock(
+        params: ExecuteAgentParams,
+        callId: string,
+        name: string,
+        status: 'running' | 'complete' | 'error',
+        stepEntityId?: string,
+        opts?: { label?: string; detail?: string }
+    ): void {
+        if (!params.onStreaming) {
+            return;
+        }
+        const block: AgentStreamBlock = {
+            Kind: 'tool-call',
+            CallID: callId,
+            Name: name,
+            Status: status,
+            Label: opts?.label,
+            Detail: opts?.detail != null ? this.truncateForStream(opts.detail) : undefined
+        };
+        this.emitStreamBlock(params, block, stepEntityId);
+    }
+
+    /**
+     * Truncates a string for inclusion in a stream block `Detail`/`Label`,
+     * collapsing whitespace and capping length (~140 chars by default).
+     *
+     * @private
+     */
+    private truncateForStream(text: string, maxLength: number = 140): string {
+        const collapsed = text.replace(/\s+/g, ' ').trim();
+        return collapsed.length > maxLength ? `${collapsed.slice(0, maxLength - 1)}…` : collapsed;
+    }
+
+    /**
      * Executes a prompt step and tracks it.
-     * 
+     *
      * @private
      */
     private async executePromptStep<P = any>(
@@ -6292,11 +6442,29 @@ The context is now within limits. Please retry your request with the recovered c
             
             // Pass cancellation token and streaming callbacks to prompt execution
             promptParams.cancellationToken = params.cancellationToken;
+            // The LLM streams a raw `LoopAgentResponse` JSON envelope token-by-token
+            // (`{ "message": "...", "reasoning": "...", ... }`). Downstream consumers
+            // (chat UI, voice TTS) want the human-readable PROSE — never the JSON.
+            // We crack the `message` value out of the partial JSON AS IT STREAMS and
+            // re-emit it as a native `text` AgentStreamBlock, so nothing downstream
+            // ever parses JSON. This is the Loop agent's legacy-JSON → typed-blocks
+            // adapter, living here at the source of the stream.
+            const messageExtractor = new MessageFieldExtractor('message');
             promptParams.onStreaming = params.onStreaming ? (chunk) => {
-                // For streaming, we need to wrap it differently since chunk doesn't have metadata
-                // The server resolver should get the agent run from the closure
+                // The server resolver should get the agent run from the closure.
+                // Each prompt step emits a self-contained JSON envelope, and a single
+                // prompt step is one extractor lifetime — no stepEntityId boundary to
+                // reset across here (the extractor is scoped to this step). Crack the
+                // prose delta out of the raw JSON and forward it as a typed `text`
+                // block, with the chunk `content` ALSO set to the prose (never JSON).
+                const proseDelta = chunk.content ? messageExtractor.Feed(chunk.content) : '';
+                if (proseDelta.length === 0) {
+                    return; // No prose this chunk (JSON syntax, reasoning, etc.) — skip.
+                }
                 params.onStreaming!({
                     ...chunk,
+                    content: proseDelta,
+                    block: { Kind: 'text', Content: proseDelta },
                     stepType: 'prompt',
                     stepEntityId: stepEntity.ID
                 });
@@ -6540,9 +6708,16 @@ The context is now within limits. Please retry your request with the recovered c
             // Update nextStep to include the final payload
             updatedNextStep.newPayload = finalPayload;
             updatedNextStep.previousPayload = payload;
-            
+
+            // Emit strongly-typed content blocks now that the next step is fully
+            // decided & validated. These ride the `onStreaming` rail with a typed
+            // `block` and an empty `content`, so existing token-accumulating
+            // consumers are unaffected. We emit only from CLEAN structured data the
+            // agent already holds — never from raw in-flight prompt JSON.
+            this.emitNextStepBlocks(params, updatedNextStep, stepEntity.ID);
+
             // Finalize step entity
-            await this.finalizeStepEntity(stepEntity, promptResult.success, 
+            await this.finalizeStepEntity(stepEntity, promptResult.success,
                 promptResult.success ? undefined : promptResult.errorMessage, outputData);
             
             // Return based on next step
@@ -8352,21 +8527,26 @@ The context is now within limits. Please retry your request with the recovered c
                 lastStep = stepEntity;
                 // Override step number to ensure unique values for parallel actions
                 stepEntity.StepNumber = baseStepNumber + numActionsProcessed++;
-                
+
                 // Increment execution count for this action
                 this.incrementExecutionCount(actionEntity.ID);
-                
+
+                // Stable per-call tool-call ID: the action step entity uniquely
+                // identifies this invocation. Used for both running + finish blocks.
+                const toolCallId = stepEntity.ID;
+                this.emitToolCallBlock(params, toolCallId, aa.name, 'running', stepEntity.ID, { label: `Running ${aa.name}…` });
+
                 let actionResult: ActionResult;
                 try {
                     // Execute the action
                     actionResult = await this.ExecuteSingleAction(params, aa, actionEntity, params.contextUser);
-                    
+
                     // Update step entity with ActionExecutionLog ID if available
                     if (actionResult.LogEntry?.ID) {
                         stepEntity.TargetLogID = actionResult.LogEntry.ID;
                         this.queueStepSave(stepEntity);
                     }
-                    
+
                     // Prepare output data with action result
                     const outputData = {
                         actionResult: {
@@ -8376,15 +8556,32 @@ The context is now within limits. Please retry your request with the recovered c
                             parameters: actionResult.Params
                         }
                     };
-                    
+
                     // Finalize step entity with output data
-                    await this.finalizeStepEntity(stepEntity, actionResult.Success, 
+                    await this.finalizeStepEntity(stepEntity, actionResult.Success,
                         actionResult.Success ? undefined : actionResult.Message, outputData);
-                    
+
+                    this.emitToolCallBlock(
+                        params,
+                        toolCallId,
+                        aa.name,
+                        actionResult.Success ? 'complete' : 'error',
+                        stepEntity.ID,
+                        {
+                            label: `Running ${aa.name}…`,
+                            detail: actionResult.Message ?? actionResult.Result?.ResultCode
+                        }
+                    );
+
                     return { success: true, result: actionResult, action: aa, actionEntity, stepEntity };
-                    
+
                 } catch (error) {
                     await this.finalizeStepEntity(stepEntity, false, error.message);
+
+                    this.emitToolCallBlock(params, toolCallId, aa.name, 'error', stepEntity.ID, {
+                        label: `Running ${aa.name}…`,
+                        detail: error.message
+                    });
 
                     return { success: false, result: actionResult, error: error.message, action: aa, actionEntity, stepEntity };
                 }

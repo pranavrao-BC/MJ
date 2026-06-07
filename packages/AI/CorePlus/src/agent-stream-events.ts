@@ -68,6 +68,48 @@ export type AgentStreamEvent =
 export type AgentStreamDoneReason = 'Stop' | 'Length' | 'ToolUse';
 
 /**
+ * A strongly-typed content BLOCK streamed during an agent run.
+ *
+ * This is the native typed unit of interim streaming: instead of pushing a flat
+ * string chunk (and re-deriving what it means downstream), the agent emits a
+ * block whose `Kind` *is* its rendering contract. A `text` block is prose, a
+ * `tool-call` block is an in-flight tool, an `html` block is rich markup
+ * (SVG-in-HTML for agent-drawn diagrams). Nothing has to be cracked open
+ * downstream — the renderer switches on `Kind`.
+ *
+ * Crucially this is INTERIM streaming only: it rides during a run for low
+ * latency. The TERMINAL result of a run is still `LoopAgentResponse` /
+ * `ExecuteAgentResult` — blocks never replace it.
+ *
+ * Carried on `AgentExecutionStreamingCallback`'s chunk (additive — `content`
+ * stays for back-compat) and transported over the existing PushStatusUpdates
+ * rails to the conversations chat.
+ */
+export type AgentStreamBlock =
+    /** User-facing prose (the streamed answer). Rendered as markdown. */
+    | { Kind: 'text'; Content: string }
+    /** Reasoning / scratch-thinking. Rendered de-emphasized; never the final answer. */
+    | { Kind: 'thinking'; Content: string }
+    /** An in-flight tool / action / sub-agent call, surfaced as it runs. */
+    | {
+          Kind: 'tool-call';
+          CallID: string;
+          Name: string;
+          Status: 'running' | 'complete' | 'error';
+          /** Short human label, e.g. "Delegating to Code Smith…". */
+          Label?: string;
+          /** One-line detail (task summary, result preview, or error). */
+          Detail?: string;
+      }
+    /** The settled result of a prior `tool-call` (matched by `CallID`). */
+    | { Kind: 'tool-result'; CallID: string; Result?: string; Error?: string }
+    /** Rich agent-authored markup (SVG-in-HTML for diagrams/whiteboard content). */
+    | { Kind: 'html'; Html: string };
+
+/** The discriminant of {@link AgentStreamBlock}. */
+export type AgentStreamBlockKind = AgentStreamBlock['Kind'];
+
+/**
  * Unbounded single-producer / single-consumer async queue. Inlined here (rather
  * than imported) to keep `ai-core-plus` dependency-free; mirrors the queue idiom
  * used by the channel transports. Internal to this module.

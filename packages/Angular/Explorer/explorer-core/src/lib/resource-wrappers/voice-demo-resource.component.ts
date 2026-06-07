@@ -65,7 +65,7 @@ export class VoiceDemoResource extends BaseResourceComponent implements OnInit {
      * `Data.Configuration['agentId']` when present, otherwise falls back to the
      * hard-coded dev metadata ID from `plans/audio-agent-architecture.md`.
      */
-    public AgentID = '3AB78346-897F-4238-AA6A-F10A131CC691';
+    public AgentID = '7596CD3F-8233-4684-86A3-9AEB5EAFEAEE';
 
     public override ngOnInit(): void {
         super.ngOnInit();

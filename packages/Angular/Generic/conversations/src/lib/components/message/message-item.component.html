@@ -70,12 +70,45 @@
 
     <div class="message-body">
       @if (!isEditing) {
-        <div class="message-text">
-          <mj-markdown [data]="displayMessage" [enableCollapsibleHeadings]="true"></mj-markdown>
-          @if (isMessageEdited) {
-            <span class="edited-badge">(edited)</span>
-          }
-        </div>
+        @if (hasStreamingBlocks) {
+          <!-- Live typed streaming blocks (in-progress message only). Replaced by the
+               finalized message.Message rendering below once the run completes. -->
+          <div class="message-stream-blocks">
+            @for (block of streamingBlocks; track trackStreamingBlock($index, block)) {
+              @switch (block.Kind) {
+                @case ('text') {
+                  <div class="stream-block stream-text">
+                    <mj-markdown [data]="block.Content" [enableCollapsibleHeadings]="true"></mj-markdown>
+                  </div>
+                }
+                @case ('thinking') {
+                  <div class="stream-block stream-thinking">{{ block.Content }}</div>
+                }
+                @case ('tool-call') {
+                  <div class="stream-block stream-tool-call" [class.is-error]="block.Status === 'error'" [class.is-complete]="block.Status === 'complete'">
+                    <span class="tool-call-row">
+                      <i [class]="toolCallIconClass(block)" aria-hidden="true"></i>
+                      <span class="tool-call-label">{{ block.Label || block.Name }}</span>
+                    </span>
+                    @if (block.Detail) {
+                      <span class="tool-call-detail">{{ block.Detail }}</span>
+                    }
+                  </div>
+                }
+                @case ('html') {
+                  <div class="stream-block stream-html" [innerHTML]="sanitizedBlockHtml(block.Html)"></div>
+                }
+              }
+            }
+          </div>
+        } @else {
+          <div class="message-text">
+            <mj-markdown [data]="displayMessage" [enableCollapsibleHeadings]="true"></mj-markdown>
+            @if (isMessageEdited) {
+              <span class="edited-badge">(edited)</span>
+            }
+          </div>
+        }
 
         <!-- Message Attachments -->
         @if (hasAttachments) {
