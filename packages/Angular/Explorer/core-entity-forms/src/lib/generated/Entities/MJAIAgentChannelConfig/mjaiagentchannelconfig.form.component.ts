@@ -17,7 +17,7 @@ export class MJAIAgentChannelConfigFormComponent extends BaseFormComponent {
         this.initSections([
             { sectionKey: 'agentChannelMapping', sectionName: 'Agent Channel Mapping', isExpanded: true },
             { sectionKey: 'configurationSettings', sectionName: 'Configuration Settings', isExpanded: true },
-            { sectionKey: 'voicePersona', sectionName: 'Voice Persona', isExpanded: false },
+            { sectionKey: 'voicePersona', sectionName: 'Voice Persona', isExpanded: true },
             { sectionKey: 'systemMetadata', sectionName: 'System Metadata', isExpanded: false }
         ]);
     }

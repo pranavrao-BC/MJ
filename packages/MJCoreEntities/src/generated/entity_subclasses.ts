@@ -1061,6 +1061,147 @@ export const MJAIAgentCategorySchema = z.object({
 export type MJAIAgentCategoryEntityType = z.infer<typeof MJAIAgentCategorySchema>;
 
 /**
+ * zod schema definition for the entity MJ: AI Agent Channel Configs
+ */
+export const MJAIAgentChannelConfigSchema = z.object({
+    ID: z.string().describe(`
+        * * Field Name: ID
+        * * Display Name: ID
+        * * SQL Data Type: uniqueidentifier
+        * * Default Value: newsequentialid()
+        * * Description: Primary key for the AIAgentChannelConfig record.`),
+    AIAgentID: z.string().describe(`
+        * * Field Name: AIAgentID
+        * * Display Name: AI Agent
+        * * SQL Data Type: uniqueidentifier
+        * * Related Entity/Foreign Key: MJ: AI Agents (vwAIAgents.ID)
+        * * Description: Foreign key to AIAgent. The agent that supports this channel.`),
+    AIAgentChannelID: z.string().describe(`
+        * * Field Name: AIAgentChannelID
+        * * Display Name: AI Agent Channel
+        * * SQL Data Type: uniqueidentifier
+        * * Related Entity/Foreign Key: MJ: AI Agent Channels (vwAIAgentChannels.ID)
+        * * Description: Foreign key to AIAgentChannel. The channel the agent supports.`),
+    Sequence: z.number().describe(`
+        * * Field Name: Sequence
+        * * Display Name: Sequence
+        * * SQL Data Type: int
+        * * Default Value: 0
+        * * Description: Preferred order when multiple channels are eligible for a given session. Lower values are preferred earlier.`),
+    Status: z.union([z.literal('Active'), z.literal('Disabled'), z.literal('Pending')]).describe(`
+        * * Field Name: Status
+        * * Display Name: Status
+        * * SQL Data Type: nvarchar(20)
+        * * Default Value: Active
+    * * Value List Type: List
+    * * Possible Values 
+    *   * Active
+    *   * Disabled
+    *   * Pending
+        * * Description: Lifecycle state of this agent-channel binding: Active, Pending, Disabled.`),
+    ConfigJSON: z.string().nullable().describe(`
+        * * Field Name: ConfigJSON
+        * * Display Name: Configuration Overrides
+        * * SQL Data Type: nvarchar(MAX)
+        * * Description: Sparse JSON override of the channel's DefaultConfigJSON. Validated against the variant indicated by AIAgentChannel.ConfigJSONSchemaName.`),
+    AIVoiceProfileID: z.string().nullable().describe(`
+        * * Field Name: AIVoiceProfileID
+        * * Display Name: AI Voice Profile
+        * * SQL Data Type: uniqueidentifier
+        * * Related Entity/Foreign Key: MJ: AI Voice Profiles (vwAIVoiceProfiles.ID)
+        * * Description: Foreign key to AIVoiceProfile. Preferred voice persona when this channel is voice-capable. Nullable.`),
+    LatencyBudgetMs: z.number().nullable().describe(`
+        * * Field Name: LatencyBudgetMs
+        * * Display Name: Latency Budget (ms)
+        * * SQL Data Type: int
+        * * Description: Soft cap on per-turn latency in milliseconds. Runtime may emit filler TTS or take other action when this budget is exceeded.`),
+    __mj_CreatedAt: z.date().describe(`
+        * * Field Name: __mj_CreatedAt
+        * * Display Name: Created At
+        * * SQL Data Type: datetimeoffset
+        * * Default Value: getutcdate()`),
+    __mj_UpdatedAt: z.date().describe(`
+        * * Field Name: __mj_UpdatedAt
+        * * Display Name: Updated At
+        * * SQL Data Type: datetimeoffset
+        * * Default Value: getutcdate()`),
+    AIAgent: z.string().nullable().describe(`
+        * * Field Name: AIAgent
+        * * Display Name: AI Agent Name
+        * * SQL Data Type: nvarchar(255)`),
+    AIAgentChannel: z.string().describe(`
+        * * Field Name: AIAgentChannel
+        * * Display Name: AI Agent Channel Name
+        * * SQL Data Type: nvarchar(50)`),
+    AIVoiceProfile: z.string().nullable().describe(`
+        * * Field Name: AIVoiceProfile
+        * * Display Name: AI Voice Profile Name
+        * * SQL Data Type: nvarchar(100)`),
+});
+
+export type MJAIAgentChannelConfigEntityType = z.infer<typeof MJAIAgentChannelConfigSchema>;
+
+/**
+ * zod schema definition for the entity MJ: AI Agent Channels
+ */
+export const MJAIAgentChannelSchema = z.object({
+    ID: z.string().describe(`
+        * * Field Name: ID
+        * * Display Name: ID
+        * * SQL Data Type: uniqueidentifier
+        * * Default Value: newsequentialid()
+        * * Description: Primary key for the AIAgentChannel record.`),
+    Name: z.string().describe(`
+        * * Field Name: Name
+        * * Display Name: Name
+        * * SQL Data Type: nvarchar(50)
+        * * Description: Unique channel identifier used in code and metadata (e.g., text-chat, voice-cascaded, voice-realtime, phone, video-realtime).`),
+    Description: z.string().nullable().describe(`
+        * * Field Name: Description
+        * * Display Name: Description
+        * * SQL Data Type: nvarchar(MAX)
+        * * Description: Human-readable description of the channel and what it does.`),
+    DriverClass: z.string().describe(`
+        * * Field Name: DriverClass
+        * * Display Name: Driver Class
+        * * SQL Data Type: nvarchar(100)
+        * * Description: The @RegisterClass key for the BaseChannelEngine implementation that drives this channel (e.g., CascadedChannelEngine, RealtimeChannelEngine, TextChatChannelEngine).`),
+    ConfigJSONSchemaName: z.string().describe(`
+        * * Field Name: ConfigJSONSchemaName
+        * * Display Name: Config JSON Schema Name
+        * * SQL Data Type: nvarchar(100)
+        * * Description: TypeScript discriminator name identifying which AgentChannelConfig variant validates this channel's ConfigJSON (e.g., VoiceCascadedConfig, VoiceRealtimeConfig).`),
+    DefaultConfigJSON: z.string().nullable().describe(`
+        * * Field Name: DefaultConfigJSON
+        * * Display Name: Default Configuration
+        * * SQL Data Type: nvarchar(MAX)
+        * * Description: Channel-wide default JSON config. Merged underneath any per-agent overrides in AIAgentChannelConfig.ConfigJSON.`),
+    Status: z.union([z.literal('Active'), z.literal('Disabled'), z.literal('Pending')]).describe(`
+        * * Field Name: Status
+        * * Display Name: Status
+        * * SQL Data Type: nvarchar(20)
+        * * Default Value: Active
+    * * Value List Type: List
+    * * Possible Values 
+    *   * Active
+    *   * Disabled
+    *   * Pending
+        * * Description: Lifecycle state of the channel definition: Active (usable), Pending (in development), Disabled (not selectable).`),
+    __mj_CreatedAt: z.date().describe(`
+        * * Field Name: __mj_CreatedAt
+        * * Display Name: Created At
+        * * SQL Data Type: datetimeoffset
+        * * Default Value: getutcdate()`),
+    __mj_UpdatedAt: z.date().describe(`
+        * * Field Name: __mj_UpdatedAt
+        * * Display Name: Updated At
+        * * SQL Data Type: datetimeoffset
+        * * Default Value: getutcdate()`),
+});
+
+export type MJAIAgentChannelEntityType = z.infer<typeof MJAIAgentChannelSchema>;
+
+/**
  * zod schema definition for the entity MJ: AI Agent Client Tools
  */
 export const MJAIAgentClientToolSchema = z.object({
@@ -2846,12 +2987,12 @@ export const MJAIAgentRunSchema = z.object({
         * * Default Value: getutcdate()`),
     TotalPromptTokensUsed: z.number().nullable().describe(`
         * * Field Name: TotalPromptTokensUsed
-        * * Display Name: Prompt Tokens
+        * * Display Name: Prompt Tokens Used
         * * SQL Data Type: int
         * * Description: Total number of prompt/input tokens used across all AIPromptRun executions during this agent run. This provides a breakdown of the TotalTokensUsed field to help analyze the ratio of input vs output tokens consumed by the agent.`),
     TotalCompletionTokensUsed: z.number().nullable().describe(`
         * * Field Name: TotalCompletionTokensUsed
-        * * Display Name: Completion Tokens
+        * * Display Name: Completion Tokens Used
         * * SQL Data Type: int
         * * Description: Total number of completion/output tokens generated across all AIPromptRun executions during this agent run. This provides a breakdown of the TotalTokensUsed field to help analyze the ratio of input vs output tokens consumed by the agent.`),
     TotalTokensUsedRollup: z.number().nullable().describe(`
@@ -2933,7 +3074,7 @@ export const MJAIAgentRunSchema = z.object({
         * * Description: The initial payload provided at the start of this run. Can be populated from the FinalPayload of the LastRun.`),
     TotalPromptIterations: z.number().describe(`
         * * Field Name: TotalPromptIterations
-        * * Display Name: Total Prompt Iterations
+        * * Display Name: Prompt Iterations
         * * SQL Data Type: int
         * * Default Value: 0
         * * Description: Total number of prompt iterations executed during this agent run. Incremented
@@ -2946,13 +3087,13 @@ each time the agent processes a prompt step.`),
         * * Description: The AI Configuration used for this agent execution. When set, this configuration was used for all prompts executed by this agent and its sub-agents.`),
     OverrideModelID: z.string().nullable().describe(`
         * * Field Name: OverrideModelID
-        * * Display Name: Override Model
+        * * Display Name: Model Override
         * * SQL Data Type: uniqueidentifier
         * * Related Entity/Foreign Key: MJ: AI Models (vwAIModels.ID)
         * * Description: Runtime model override that was used for this execution. When set, this model took precedence over all other model selection methods.`),
     OverrideVendorID: z.string().nullable().describe(`
         * * Field Name: OverrideVendorID
-        * * Display Name: Override Vendor
+        * * Display Name: Vendor Override
         * * SQL Data Type: uniqueidentifier
         * * Related Entity/Foreign Key: MJ: AI Vendors (vwAIVendors.ID)
         * * Description: Runtime vendor override that was used for this execution. When set along with OverrideModelID, this vendor was used to provide the model.`),
@@ -3030,54 +3171,69 @@ each time the agent processes a prompt step.`),
         * * Display Name: Cache Write Tokens
         * * SQL Data Type: int
         * * Description: Total input tokens written to the AI provider's prompt cache (cache writes / creation) across this agent run, summed from child prompt runs' TokensCacheWriteRollup and sub-agent runs' TotalCacheWriteTokensUsed. Populated for providers that bill cache creation (e.g. Anthropic); 0 or NULL otherwise. The cache counterpart of TotalCompletionTokensUsed.`),
+    LastHeartbeatAt: z.date().nullable().describe(`
+        * * Field Name: LastHeartbeatAt
+        * * Display Name: Last Heartbeat At
+        * * SQL Data Type: datetimeoffset
+        * * Description: Timestamp of the most recent liveness heartbeat written by the owning process while this run is in progress. Used by the agent-run watchdog to detect runs orphaned by a process restart/crash or a failed terminal-state write: a Running row whose LastHeartbeatAt has gone stale (or is NULL with an old StartedAt) is force-failed. Always stamped on the database clock (GETUTCDATE), never process time.`),
+    AIAgentChannelID: z.string().nullable().describe(`
+        * * Field Name: AIAgentChannelID
+        * * Display Name: Agent Channel
+        * * SQL Data Type: uniqueidentifier
+        * * Related Entity/Foreign Key: MJ: AI Agent Channels (vwAIAgentChannels.ID)
+        * * Description: Foreign key to AIAgentChannel. The channel this run executed over. Nullable for backward compatibility with pre-channel runs.`),
     Agent: z.string().nullable().describe(`
         * * Field Name: Agent
         * * Display Name: Agent Details
         * * SQL Data Type: nvarchar(255)`),
     ParentRun: z.string().nullable().describe(`
         * * Field Name: ParentRun
-        * * Display Name: Parent Run Details
+        * * Display Name: Parent Run Info
         * * SQL Data Type: nvarchar(255)`),
     Conversation: z.string().nullable().describe(`
         * * Field Name: Conversation
-        * * Display Name: Conversation Details
+        * * Display Name: Conversation Info
         * * SQL Data Type: nvarchar(255)`),
     User: z.string().nullable().describe(`
         * * Field Name: User
-        * * Display Name: User Details
+        * * Display Name: User Info
         * * SQL Data Type: nvarchar(100)`),
     ConversationDetail: z.string().nullable().describe(`
         * * Field Name: ConversationDetail
-        * * Display Name: Conversation Detail Details
+        * * Display Name: Conversation Detail Info
         * * SQL Data Type: nvarchar(MAX)`),
     LastRun: z.string().nullable().describe(`
         * * Field Name: LastRun
-        * * Display Name: Last Run Details
+        * * Display Name: Last Run Info
         * * SQL Data Type: nvarchar(255)`),
     Configuration: z.string().nullable().describe(`
         * * Field Name: Configuration
-        * * Display Name: Configuration Details
+        * * Display Name: Configuration Info
         * * SQL Data Type: nvarchar(100)`),
     OverrideModel: z.string().nullable().describe(`
         * * Field Name: OverrideModel
-        * * Display Name: Override Model Details
+        * * Display Name: Model Info
         * * SQL Data Type: nvarchar(50)`),
     OverrideVendor: z.string().nullable().describe(`
         * * Field Name: OverrideVendor
-        * * Display Name: Override Vendor Details
+        * * Display Name: Vendor Info
         * * SQL Data Type: nvarchar(50)`),
     ScheduledJobRun: z.string().nullable().describe(`
         * * Field Name: ScheduledJobRun
-        * * Display Name: Scheduled Job Details
+        * * Display Name: Scheduled Job Info
         * * SQL Data Type: nvarchar(200)`),
     TestRun: z.string().nullable().describe(`
         * * Field Name: TestRun
-        * * Display Name: Test Run Details
+        * * Display Name: Test Run Info
         * * SQL Data Type: nvarchar(255)`),
     PrimaryScopeEntity: z.string().nullable().describe(`
         * * Field Name: PrimaryScopeEntity
-        * * Display Name: Primary Scope Entity Details
+        * * Display Name: Scope Entity Info
         * * SQL Data Type: nvarchar(255)`),
+    AIAgentChannel: z.string().nullable().describe(`
+        * * Field Name: AIAgentChannel
+        * * Display Name: Agent Channel Info
+        * * SQL Data Type: nvarchar(50)`),
     RootParentRunID: z.string().nullable().describe(`
         * * Field Name: RootParentRunID
         * * Display Name: Root Parent Run
@@ -6635,6 +6791,60 @@ export const MJAIVendorSchema = z.object({
 });
 
 export type MJAIVendorEntityType = z.infer<typeof MJAIVendorSchema>;
+
+/**
+ * zod schema definition for the entity MJ: AI Voice Profiles
+ */
+export const MJAIVoiceProfileSchema = z.object({
+    ID: z.string().describe(`
+        * * Field Name: ID
+        * * Display Name: ID
+        * * SQL Data Type: uniqueidentifier
+        * * Default Value: newsequentialid()
+        * * Description: Primary key for the AIVoiceProfile record.`),
+    Name: z.string().describe(`
+        * * Field Name: Name
+        * * Display Name: Name
+        * * SQL Data Type: nvarchar(100)
+        * * Description: Unique display name for the voice profile (e.g., "Sage Default", "Customer Service Warm").`),
+    Description: z.string().nullable().describe(`
+        * * Field Name: Description
+        * * Display Name: Description
+        * * SQL Data Type: nvarchar(MAX)
+        * * Description: Description of the persona and when to use it.`),
+    LanguageCode: z.string().describe(`
+        * * Field Name: LanguageCode
+        * * Display Name: Language Code
+        * * SQL Data Type: nvarchar(20)
+        * * Description: BCP-47 language tag for the voice (e.g., en-US, es-ES, fr-FR).`),
+    StyleHint: z.string().nullable().describe(`
+        * * Field Name: StyleHint
+        * * Display Name: Style Hint
+        * * SQL Data Type: nvarchar(MAX)
+        * * Description: Free-form, provider-neutral style/role/tone hint passed to TTS/realtime engines (e.g., "warm and confident", "energetic customer service").`),
+    SampleAudioURL: z.string().nullable().describe(`
+        * * Field Name: SampleAudioURL
+        * * Display Name: Sample Audio URL
+        * * SQL Data Type: nvarchar(500)
+        * * Description: URL to a sample audio clip. Used by providers that support voice cloning from a reference recording.`),
+    ProviderOverridesJSON: z.string().nullable().describe(`
+        * * Field Name: ProviderOverridesJSON
+        * * Display Name: Provider Overrides
+        * * SQL Data Type: nvarchar(MAX)
+        * * Description: JSON object keyed by provider with provider-specific knobs (e.g., { "elevenlabs": { "voiceId": "...", "stability": 0.5 }, "cartesia": { ... } }).`),
+    __mj_CreatedAt: z.date().describe(`
+        * * Field Name: __mj_CreatedAt
+        * * Display Name: Created At
+        * * SQL Data Type: datetimeoffset
+        * * Default Value: getutcdate()`),
+    __mj_UpdatedAt: z.date().describe(`
+        * * Field Name: __mj_UpdatedAt
+        * * Display Name: Updated At
+        * * SQL Data Type: datetimeoffset
+        * * Default Value: getutcdate()`),
+});
+
+export type MJAIVoiceProfileEntityType = z.infer<typeof MJAIVoiceProfileSchema>;
 
 /**
  * zod schema definition for the entity MJ: API Application Scopes
@@ -11777,7 +11987,7 @@ export const MJConversationDetailSchema = z.object({
         * * Description: This column stores human or AI-generated reflections on how to improve future responses based on the user feedback and the AI output generated for prior messages in the conversation.`),
     SummaryOfEarlierConversation: z.string().nullable().describe(`
         * * Field Name: SummaryOfEarlierConversation
-        * * Display Name: Summary Of Earlier Conversation
+        * * Display Name: Conversation Summary
         * * SQL Data Type: nvarchar(MAX)
         * * Description: This column optionally stores a summary of the entire conversation leading up to this particular conversation detail record. It is used in long-running conversations to optimize performance by summarizing earlier parts.`),
     UserID: z.string().nullable().describe(`
@@ -11800,7 +12010,7 @@ export const MJConversationDetailSchema = z.object({
         * * Description: Optional reference to a specific version of a conversation artifact associated with this conversation detail`),
     CompletionTime: z.number().nullable().describe(`
         * * Field Name: CompletionTime
-        * * Display Name: Completion Time
+        * * Display Name: Completion Time (ms)
         * * SQL Data Type: bigint
         * * Description: Duration in milliseconds representing how long the AI response processing took to complete for this conversation detail.`),
     IsPinned: z.boolean().describe(`
@@ -11811,7 +12021,7 @@ export const MJConversationDetailSchema = z.object({
         * * Description: Indicates if this message is pinned within the conversation for easy reference`),
     ParentID: z.string().nullable().describe(`
         * * Field Name: ParentID
-        * * Display Name: Parent
+        * * Display Name: Parent Message
         * * SQL Data Type: uniqueidentifier
         * * Related Entity/Foreign Key: MJ: Conversation Details (vwConversationDetails.ID)
         * * Description: Optional reference to parent message for threaded conversations. NULL for top-level messages.`),
@@ -11834,7 +12044,7 @@ export const MJConversationDetailSchema = z.object({
         * * Description: Status of the conversation message. Complete indicates finished processing, In-Progress indicates active agent work, Error indicates processing failed.`),
     SuggestedResponses: z.string().nullable().describe(`
         * * Field Name: SuggestedResponses
-        * * Display Name: Suggested Responses
+        * * Display Name: Suggested Responses (Legacy)
         * * SQL Data Type: nvarchar(MAX)
         * * Description: DEPRECATED: Use ResponseForm, ActionableCommands, and AutomaticCommands instead. Legacy field for simple text-based suggested responses. Replaced in v2.118 by more powerful structured forms and commands system. Retained for historical data only.`),
     TestRunID: z.string().nullable().describe(`
@@ -11864,37 +12074,47 @@ export const MJConversationDetailSchema = z.object({
         * * SQL Data Type: bit
         * * Default Value: 0
         * * Description: Indicates if the original message content was modified after initial creation. Set automatically by the server when the Message field is changed on update.`),
+    AIContentTypeID: z.string().nullable().describe(`
+        * * Field Name: AIContentTypeID
+        * * Display Name: AI Content Type
+        * * SQL Data Type: uniqueidentifier
+        * * Related Entity/Foreign Key: MJ: AI Modalities (vwAIModalities.ID)
+        * * Description: Foreign key to AIModality. Content type of this conversation turn (text, audio, etc.) for replay and UX rendering. Nullable; existing rows remain NULL.`),
     Conversation: z.string().nullable().describe(`
         * * Field Name: Conversation
-        * * Display Name: Conversation
+        * * Display Name: Conversation Label
         * * SQL Data Type: nvarchar(255)`),
     User: z.string().nullable().describe(`
         * * Field Name: User
-        * * Display Name: User
+        * * Display Name: User Label
         * * SQL Data Type: nvarchar(100)`),
     Artifact: z.string().nullable().describe(`
         * * Field Name: Artifact
-        * * Display Name: Artifact
+        * * Display Name: Artifact Label
         * * SQL Data Type: nvarchar(255)`),
     ArtifactVersion: z.string().nullable().describe(`
         * * Field Name: ArtifactVersion
-        * * Display Name: Artifact Version
+        * * Display Name: Artifact Version Label
         * * SQL Data Type: nvarchar(255)`),
     Parent: z.string().nullable().describe(`
         * * Field Name: Parent
-        * * Display Name: Parent
+        * * Display Name: Parent Message Label
         * * SQL Data Type: nvarchar(MAX)`),
     Agent: z.string().nullable().describe(`
         * * Field Name: Agent
-        * * Display Name: Agent
+        * * Display Name: Agent Label
         * * SQL Data Type: nvarchar(255)`),
     TestRun: z.string().nullable().describe(`
         * * Field Name: TestRun
-        * * Display Name: Test Run
+        * * Display Name: Test Run Label
         * * SQL Data Type: nvarchar(255)`),
+    AIContentType: z.string().nullable().describe(`
+        * * Field Name: AIContentType
+        * * Display Name: AI Content Type Label
+        * * SQL Data Type: nvarchar(50)`),
     RootParentID: z.string().nullable().describe(`
         * * Field Name: RootParentID
-        * * Display Name: Root Parent
+        * * Display Name: Root Parent ID
         * * SQL Data Type: uniqueidentifier`),
 });
 
@@ -30207,6 +30427,350 @@ export class MJAIAgentCategoryEntity extends BaseEntity<MJAIAgentCategoryEntityT
 
 
 /**
+ * MJ: AI Agent Channel Configs - strongly typed entity sub-class
+ * * Schema: __mj
+ * * Base Table: AIAgentChannelConfig
+ * * Base View: vwAIAgentChannelConfigs
+ * * @description Join table between AIAgent and AIAgentChannel. Captures which channels an agent supports, their preferred ordering, per-agent JSON overrides, optional voice profile, and latency budget.
+ * * Primary Key: ID
+ * @extends {BaseEntity}
+ * @class
+ * @public
+ */
+@RegisterClass(BaseEntity, 'MJ: AI Agent Channel Configs')
+export class MJAIAgentChannelConfigEntity extends BaseEntity<MJAIAgentChannelConfigEntityType> {
+    /**
+    * Loads the MJ: AI Agent Channel Configs record from the database
+    * @param ID: string - primary key value to load the MJ: AI Agent Channel Configs record.
+    * @param EntityRelationshipsToLoad - (optional) the relationships to load
+    * @returns {Promise<boolean>} - true if successful, false otherwise
+    * @public
+    * @async
+    * @memberof MJAIAgentChannelConfigEntity
+    * @method
+    * @override
+    */
+    public async Load(ID: string, EntityRelationshipsToLoad?: string[]) : Promise<boolean> {
+        const compositeKey: CompositeKey = new CompositeKey();
+        compositeKey.KeyValuePairs.push({ FieldName: 'ID', Value: ID });
+        return await super.InnerLoad(compositeKey, EntityRelationshipsToLoad);
+    }
+
+    /**
+    * * Field Name: ID
+    * * Display Name: ID
+    * * SQL Data Type: uniqueidentifier
+    * * Default Value: newsequentialid()
+    * * Description: Primary key for the AIAgentChannelConfig record.
+    */
+    get ID(): string {
+        return this.Get('ID');
+    }
+    set ID(value: string) {
+        this.Set('ID', value);
+    }
+
+    /**
+    * * Field Name: AIAgentID
+    * * Display Name: AI Agent
+    * * SQL Data Type: uniqueidentifier
+    * * Related Entity/Foreign Key: MJ: AI Agents (vwAIAgents.ID)
+    * * Description: Foreign key to AIAgent. The agent that supports this channel.
+    */
+    get AIAgentID(): string {
+        return this.Get('AIAgentID');
+    }
+    set AIAgentID(value: string) {
+        this.Set('AIAgentID', value);
+    }
+
+    /**
+    * * Field Name: AIAgentChannelID
+    * * Display Name: AI Agent Channel
+    * * SQL Data Type: uniqueidentifier
+    * * Related Entity/Foreign Key: MJ: AI Agent Channels (vwAIAgentChannels.ID)
+    * * Description: Foreign key to AIAgentChannel. The channel the agent supports.
+    */
+    get AIAgentChannelID(): string {
+        return this.Get('AIAgentChannelID');
+    }
+    set AIAgentChannelID(value: string) {
+        this.Set('AIAgentChannelID', value);
+    }
+
+    /**
+    * * Field Name: Sequence
+    * * Display Name: Sequence
+    * * SQL Data Type: int
+    * * Default Value: 0
+    * * Description: Preferred order when multiple channels are eligible for a given session. Lower values are preferred earlier.
+    */
+    get Sequence(): number {
+        return this.Get('Sequence');
+    }
+    set Sequence(value: number) {
+        this.Set('Sequence', value);
+    }
+
+    /**
+    * * Field Name: Status
+    * * Display Name: Status
+    * * SQL Data Type: nvarchar(20)
+    * * Default Value: Active
+    * * Value List Type: List
+    * * Possible Values 
+    *   * Active
+    *   * Disabled
+    *   * Pending
+    * * Description: Lifecycle state of this agent-channel binding: Active, Pending, Disabled.
+    */
+    get Status(): 'Active' | 'Disabled' | 'Pending' {
+        return this.Get('Status');
+    }
+    set Status(value: 'Active' | 'Disabled' | 'Pending') {
+        this.Set('Status', value);
+    }
+
+    /**
+    * * Field Name: ConfigJSON
+    * * Display Name: Configuration Overrides
+    * * SQL Data Type: nvarchar(MAX)
+    * * Description: Sparse JSON override of the channel's DefaultConfigJSON. Validated against the variant indicated by AIAgentChannel.ConfigJSONSchemaName.
+    */
+    get ConfigJSON(): string | null {
+        return this.Get('ConfigJSON');
+    }
+    set ConfigJSON(value: string | null) {
+        this.Set('ConfigJSON', value);
+    }
+
+    /**
+    * * Field Name: AIVoiceProfileID
+    * * Display Name: AI Voice Profile
+    * * SQL Data Type: uniqueidentifier
+    * * Related Entity/Foreign Key: MJ: AI Voice Profiles (vwAIVoiceProfiles.ID)
+    * * Description: Foreign key to AIVoiceProfile. Preferred voice persona when this channel is voice-capable. Nullable.
+    */
+    get AIVoiceProfileID(): string | null {
+        return this.Get('AIVoiceProfileID');
+    }
+    set AIVoiceProfileID(value: string | null) {
+        this.Set('AIVoiceProfileID', value);
+    }
+
+    /**
+    * * Field Name: LatencyBudgetMs
+    * * Display Name: Latency Budget (ms)
+    * * SQL Data Type: int
+    * * Description: Soft cap on per-turn latency in milliseconds. Runtime may emit filler TTS or take other action when this budget is exceeded.
+    */
+    get LatencyBudgetMs(): number | null {
+        return this.Get('LatencyBudgetMs');
+    }
+    set LatencyBudgetMs(value: number | null) {
+        this.Set('LatencyBudgetMs', value);
+    }
+
+    /**
+    * * Field Name: __mj_CreatedAt
+    * * Display Name: Created At
+    * * SQL Data Type: datetimeoffset
+    * * Default Value: getutcdate()
+    */
+    get __mj_CreatedAt(): Date {
+        return this.Get('__mj_CreatedAt');
+    }
+
+    /**
+    * * Field Name: __mj_UpdatedAt
+    * * Display Name: Updated At
+    * * SQL Data Type: datetimeoffset
+    * * Default Value: getutcdate()
+    */
+    get __mj_UpdatedAt(): Date {
+        return this.Get('__mj_UpdatedAt');
+    }
+
+    /**
+    * * Field Name: AIAgent
+    * * Display Name: AI Agent Name
+    * * SQL Data Type: nvarchar(255)
+    */
+    get AIAgent(): string | null {
+        return this.Get('AIAgent');
+    }
+
+    /**
+    * * Field Name: AIAgentChannel
+    * * Display Name: AI Agent Channel Name
+    * * SQL Data Type: nvarchar(50)
+    */
+    get AIAgentChannel(): string {
+        return this.Get('AIAgentChannel');
+    }
+
+    /**
+    * * Field Name: AIVoiceProfile
+    * * Display Name: AI Voice Profile Name
+    * * SQL Data Type: nvarchar(100)
+    */
+    get AIVoiceProfile(): string | null {
+        return this.Get('AIVoiceProfile');
+    }
+}
+
+
+/**
+ * MJ: AI Agent Channels - strongly typed entity sub-class
+ * * Schema: __mj
+ * * Base Table: AIAgentChannel
+ * * Base View: vwAIAgentChannels
+ * * @description Lookup of channel kinds the agent runtime knows how to drive (text-chat, voice-cascaded, voice-realtime, phone, video-realtime). New channels are added by inserting a row and shipping a class registered under DriverClass.
+ * * Primary Key: ID
+ * @extends {BaseEntity}
+ * @class
+ * @public
+ */
+@RegisterClass(BaseEntity, 'MJ: AI Agent Channels')
+export class MJAIAgentChannelEntity extends BaseEntity<MJAIAgentChannelEntityType> {
+    /**
+    * Loads the MJ: AI Agent Channels record from the database
+    * @param ID: string - primary key value to load the MJ: AI Agent Channels record.
+    * @param EntityRelationshipsToLoad - (optional) the relationships to load
+    * @returns {Promise<boolean>} - true if successful, false otherwise
+    * @public
+    * @async
+    * @memberof MJAIAgentChannelEntity
+    * @method
+    * @override
+    */
+    public async Load(ID: string, EntityRelationshipsToLoad?: string[]) : Promise<boolean> {
+        const compositeKey: CompositeKey = new CompositeKey();
+        compositeKey.KeyValuePairs.push({ FieldName: 'ID', Value: ID });
+        return await super.InnerLoad(compositeKey, EntityRelationshipsToLoad);
+    }
+
+    /**
+    * * Field Name: ID
+    * * Display Name: ID
+    * * SQL Data Type: uniqueidentifier
+    * * Default Value: newsequentialid()
+    * * Description: Primary key for the AIAgentChannel record.
+    */
+    get ID(): string {
+        return this.Get('ID');
+    }
+    set ID(value: string) {
+        this.Set('ID', value);
+    }
+
+    /**
+    * * Field Name: Name
+    * * Display Name: Name
+    * * SQL Data Type: nvarchar(50)
+    * * Description: Unique channel identifier used in code and metadata (e.g., text-chat, voice-cascaded, voice-realtime, phone, video-realtime).
+    */
+    get Name(): string {
+        return this.Get('Name');
+    }
+    set Name(value: string) {
+        this.Set('Name', value);
+    }
+
+    /**
+    * * Field Name: Description
+    * * Display Name: Description
+    * * SQL Data Type: nvarchar(MAX)
+    * * Description: Human-readable description of the channel and what it does.
+    */
+    get Description(): string | null {
+        return this.Get('Description');
+    }
+    set Description(value: string | null) {
+        this.Set('Description', value);
+    }
+
+    /**
+    * * Field Name: DriverClass
+    * * Display Name: Driver Class
+    * * SQL Data Type: nvarchar(100)
+    * * Description: The @RegisterClass key for the BaseChannelEngine implementation that drives this channel (e.g., CascadedChannelEngine, RealtimeChannelEngine, TextChatChannelEngine).
+    */
+    get DriverClass(): string {
+        return this.Get('DriverClass');
+    }
+    set DriverClass(value: string) {
+        this.Set('DriverClass', value);
+    }
+
+    /**
+    * * Field Name: ConfigJSONSchemaName
+    * * Display Name: Config JSON Schema Name
+    * * SQL Data Type: nvarchar(100)
+    * * Description: TypeScript discriminator name identifying which AgentChannelConfig variant validates this channel's ConfigJSON (e.g., VoiceCascadedConfig, VoiceRealtimeConfig).
+    */
+    get ConfigJSONSchemaName(): string {
+        return this.Get('ConfigJSONSchemaName');
+    }
+    set ConfigJSONSchemaName(value: string) {
+        this.Set('ConfigJSONSchemaName', value);
+    }
+
+    /**
+    * * Field Name: DefaultConfigJSON
+    * * Display Name: Default Configuration
+    * * SQL Data Type: nvarchar(MAX)
+    * * Description: Channel-wide default JSON config. Merged underneath any per-agent overrides in AIAgentChannelConfig.ConfigJSON.
+    */
+    get DefaultConfigJSON(): string | null {
+        return this.Get('DefaultConfigJSON');
+    }
+    set DefaultConfigJSON(value: string | null) {
+        this.Set('DefaultConfigJSON', value);
+    }
+
+    /**
+    * * Field Name: Status
+    * * Display Name: Status
+    * * SQL Data Type: nvarchar(20)
+    * * Default Value: Active
+    * * Value List Type: List
+    * * Possible Values 
+    *   * Active
+    *   * Disabled
+    *   * Pending
+    * * Description: Lifecycle state of the channel definition: Active (usable), Pending (in development), Disabled (not selectable).
+    */
+    get Status(): 'Active' | 'Disabled' | 'Pending' {
+        return this.Get('Status');
+    }
+    set Status(value: 'Active' | 'Disabled' | 'Pending') {
+        this.Set('Status', value);
+    }
+
+    /**
+    * * Field Name: __mj_CreatedAt
+    * * Display Name: Created At
+    * * SQL Data Type: datetimeoffset
+    * * Default Value: getutcdate()
+    */
+    get __mj_CreatedAt(): Date {
+        return this.Get('__mj_CreatedAt');
+    }
+
+    /**
+    * * Field Name: __mj_UpdatedAt
+    * * Display Name: Updated At
+    * * SQL Data Type: datetimeoffset
+    * * Default Value: getutcdate()
+    */
+    get __mj_UpdatedAt(): Date {
+        return this.Get('__mj_UpdatedAt');
+    }
+}
+
+
+/**
  * MJ: AI Agent Client Tools - strongly typed entity sub-class
  * * Schema: __mj
  * * Base Table: AIAgentClientTool
@@ -34873,7 +35437,7 @@ export class MJAIAgentRunEntity extends BaseEntity<MJAIAgentRunEntityType> {
 
     /**
     * * Field Name: TotalPromptTokensUsed
-    * * Display Name: Prompt Tokens
+    * * Display Name: Prompt Tokens Used
     * * SQL Data Type: int
     * * Description: Total number of prompt/input tokens used across all AIPromptRun executions during this agent run. This provides a breakdown of the TotalTokensUsed field to help analyze the ratio of input vs output tokens consumed by the agent.
     */
@@ -34886,7 +35450,7 @@ export class MJAIAgentRunEntity extends BaseEntity<MJAIAgentRunEntityType> {
 
     /**
     * * Field Name: TotalCompletionTokensUsed
-    * * Display Name: Completion Tokens
+    * * Display Name: Completion Tokens Used
     * * SQL Data Type: int
     * * Description: Total number of completion/output tokens generated across all AIPromptRun executions during this agent run. This provides a breakdown of the TotalTokensUsed field to help analyze the ratio of input vs output tokens consumed by the agent.
     */
@@ -35072,7 +35636,7 @@ export class MJAIAgentRunEntity extends BaseEntity<MJAIAgentRunEntityType> {
 
     /**
     * * Field Name: TotalPromptIterations
-    * * Display Name: Total Prompt Iterations
+    * * Display Name: Prompt Iterations
     * * SQL Data Type: int
     * * Default Value: 0
     * * Description: Total number of prompt iterations executed during this agent run. Incremented
@@ -35101,7 +35665,7 @@ each time the agent processes a prompt step.
 
     /**
     * * Field Name: OverrideModelID
-    * * Display Name: Override Model
+    * * Display Name: Model Override
     * * SQL Data Type: uniqueidentifier
     * * Related Entity/Foreign Key: MJ: AI Models (vwAIModels.ID)
     * * Description: Runtime model override that was used for this execution. When set, this model took precedence over all other model selection methods.
@@ -35115,7 +35679,7 @@ each time the agent processes a prompt step.
 
     /**
     * * Field Name: OverrideVendorID
-    * * Display Name: Override Vendor
+    * * Display Name: Vendor Override
     * * SQL Data Type: uniqueidentifier
     * * Related Entity/Foreign Key: MJ: AI Vendors (vwAIVendors.ID)
     * * Description: Runtime vendor override that was used for this execution. When set along with OverrideModelID, this vendor was used to provide the model.
@@ -35314,6 +35878,33 @@ each time the agent processes a prompt step.
     }
 
     /**
+    * * Field Name: LastHeartbeatAt
+    * * Display Name: Last Heartbeat At
+    * * SQL Data Type: datetimeoffset
+    * * Description: Timestamp of the most recent liveness heartbeat written by the owning process while this run is in progress. Used by the agent-run watchdog to detect runs orphaned by a process restart/crash or a failed terminal-state write: a Running row whose LastHeartbeatAt has gone stale (or is NULL with an old StartedAt) is force-failed. Always stamped on the database clock (GETUTCDATE), never process time.
+    */
+    get LastHeartbeatAt(): Date | null {
+        return this.Get('LastHeartbeatAt');
+    }
+    set LastHeartbeatAt(value: Date | null) {
+        this.Set('LastHeartbeatAt', value);
+    }
+
+    /**
+    * * Field Name: AIAgentChannelID
+    * * Display Name: Agent Channel
+    * * SQL Data Type: uniqueidentifier
+    * * Related Entity/Foreign Key: MJ: AI Agent Channels (vwAIAgentChannels.ID)
+    * * Description: Foreign key to AIAgentChannel. The channel this run executed over. Nullable for backward compatibility with pre-channel runs.
+    */
+    get AIAgentChannelID(): string | null {
+        return this.Get('AIAgentChannelID');
+    }
+    set AIAgentChannelID(value: string | null) {
+        this.Set('AIAgentChannelID', value);
+    }
+
+    /**
     * * Field Name: Agent
     * * Display Name: Agent Details
     * * SQL Data Type: nvarchar(255)
@@ -35324,7 +35915,7 @@ each time the agent processes a prompt step.
 
     /**
     * * Field Name: ParentRun
-    * * Display Name: Parent Run Details
+    * * Display Name: Parent Run Info
     * * SQL Data Type: nvarchar(255)
     */
     get ParentRun(): string | null {
@@ -35333,7 +35924,7 @@ each time the agent processes a prompt step.
 
     /**
     * * Field Name: Conversation
-    * * Display Name: Conversation Details
+    * * Display Name: Conversation Info
     * * SQL Data Type: nvarchar(255)
     */
     get Conversation(): string | null {
@@ -35342,7 +35933,7 @@ each time the agent processes a prompt step.
 
     /**
     * * Field Name: User
-    * * Display Name: User Details
+    * * Display Name: User Info
     * * SQL Data Type: nvarchar(100)
     */
     get User(): string | null {
@@ -35351,7 +35942,7 @@ each time the agent processes a prompt step.
 
     /**
     * * Field Name: ConversationDetail
-    * * Display Name: Conversation Detail Details
+    * * Display Name: Conversation Detail Info
     * * SQL Data Type: nvarchar(MAX)
     */
     get ConversationDetail(): string | null {
@@ -35360,7 +35951,7 @@ each time the agent processes a prompt step.
 
     /**
     * * Field Name: LastRun
-    * * Display Name: Last Run Details
+    * * Display Name: Last Run Info
     * * SQL Data Type: nvarchar(255)
     */
     get LastRun(): string | null {
@@ -35369,7 +35960,7 @@ each time the agent processes a prompt step.
 
     /**
     * * Field Name: Configuration
-    * * Display Name: Configuration Details
+    * * Display Name: Configuration Info
     * * SQL Data Type: nvarchar(100)
     */
     get Configuration(): string | null {
@@ -35378,7 +35969,7 @@ each time the agent processes a prompt step.
 
     /**
     * * Field Name: OverrideModel
-    * * Display Name: Override Model Details
+    * * Display Name: Model Info
     * * SQL Data Type: nvarchar(50)
     */
     get OverrideModel(): string | null {
@@ -35387,7 +35978,7 @@ each time the agent processes a prompt step.
 
     /**
     * * Field Name: OverrideVendor
-    * * Display Name: Override Vendor Details
+    * * Display Name: Vendor Info
     * * SQL Data Type: nvarchar(50)
     */
     get OverrideVendor(): string | null {
@@ -35396,7 +35987,7 @@ each time the agent processes a prompt step.
 
     /**
     * * Field Name: ScheduledJobRun
-    * * Display Name: Scheduled Job Details
+    * * Display Name: Scheduled Job Info
     * * SQL Data Type: nvarchar(200)
     */
     get ScheduledJobRun(): string | null {
@@ -35405,7 +35996,7 @@ each time the agent processes a prompt step.
 
     /**
     * * Field Name: TestRun
-    * * Display Name: Test Run Details
+    * * Display Name: Test Run Info
     * * SQL Data Type: nvarchar(255)
     */
     get TestRun(): string | null {
@@ -35414,11 +36005,20 @@ each time the agent processes a prompt step.
 
     /**
     * * Field Name: PrimaryScopeEntity
-    * * Display Name: Primary Scope Entity Details
+    * * Display Name: Scope Entity Info
     * * SQL Data Type: nvarchar(255)
     */
     get PrimaryScopeEntity(): string | null {
         return this.Get('PrimaryScopeEntity');
+    }
+
+    /**
+    * * Field Name: AIAgentChannel
+    * * Display Name: Agent Channel Info
+    * * SQL Data Type: nvarchar(50)
+    */
+    get AIAgentChannel(): string | null {
+        return this.Get('AIAgentChannel');
     }
 
     /**
@@ -45135,6 +45735,150 @@ export class MJAIVendorEntity extends BaseEntity<MJAIVendorEntityType> {
     */
     get CredentialType(): string | null {
         return this.Get('CredentialType');
+    }
+}
+
+
+/**
+ * MJ: AI Voice Profiles - strongly typed entity sub-class
+ * * Schema: __mj
+ * * Base Table: AIVoiceProfile
+ * * Base View: vwAIVoiceProfiles
+ * * @description Portable voice persona that survives provider swaps. Captures language, style, and optional provider-specific overrides so the same persona can be expressed across TTS/realtime providers.
+ * * Primary Key: ID
+ * @extends {BaseEntity}
+ * @class
+ * @public
+ */
+@RegisterClass(BaseEntity, 'MJ: AI Voice Profiles')
+export class MJAIVoiceProfileEntity extends BaseEntity<MJAIVoiceProfileEntityType> {
+    /**
+    * Loads the MJ: AI Voice Profiles record from the database
+    * @param ID: string - primary key value to load the MJ: AI Voice Profiles record.
+    * @param EntityRelationshipsToLoad - (optional) the relationships to load
+    * @returns {Promise<boolean>} - true if successful, false otherwise
+    * @public
+    * @async
+    * @memberof MJAIVoiceProfileEntity
+    * @method
+    * @override
+    */
+    public async Load(ID: string, EntityRelationshipsToLoad?: string[]) : Promise<boolean> {
+        const compositeKey: CompositeKey = new CompositeKey();
+        compositeKey.KeyValuePairs.push({ FieldName: 'ID', Value: ID });
+        return await super.InnerLoad(compositeKey, EntityRelationshipsToLoad);
+    }
+
+    /**
+    * * Field Name: ID
+    * * Display Name: ID
+    * * SQL Data Type: uniqueidentifier
+    * * Default Value: newsequentialid()
+    * * Description: Primary key for the AIVoiceProfile record.
+    */
+    get ID(): string {
+        return this.Get('ID');
+    }
+    set ID(value: string) {
+        this.Set('ID', value);
+    }
+
+    /**
+    * * Field Name: Name
+    * * Display Name: Name
+    * * SQL Data Type: nvarchar(100)
+    * * Description: Unique display name for the voice profile (e.g., "Sage Default", "Customer Service Warm").
+    */
+    get Name(): string {
+        return this.Get('Name');
+    }
+    set Name(value: string) {
+        this.Set('Name', value);
+    }
+
+    /**
+    * * Field Name: Description
+    * * Display Name: Description
+    * * SQL Data Type: nvarchar(MAX)
+    * * Description: Description of the persona and when to use it.
+    */
+    get Description(): string | null {
+        return this.Get('Description');
+    }
+    set Description(value: string | null) {
+        this.Set('Description', value);
+    }
+
+    /**
+    * * Field Name: LanguageCode
+    * * Display Name: Language Code
+    * * SQL Data Type: nvarchar(20)
+    * * Description: BCP-47 language tag for the voice (e.g., en-US, es-ES, fr-FR).
+    */
+    get LanguageCode(): string {
+        return this.Get('LanguageCode');
+    }
+    set LanguageCode(value: string) {
+        this.Set('LanguageCode', value);
+    }
+
+    /**
+    * * Field Name: StyleHint
+    * * Display Name: Style Hint
+    * * SQL Data Type: nvarchar(MAX)
+    * * Description: Free-form, provider-neutral style/role/tone hint passed to TTS/realtime engines (e.g., "warm and confident", "energetic customer service").
+    */
+    get StyleHint(): string | null {
+        return this.Get('StyleHint');
+    }
+    set StyleHint(value: string | null) {
+        this.Set('StyleHint', value);
+    }
+
+    /**
+    * * Field Name: SampleAudioURL
+    * * Display Name: Sample Audio URL
+    * * SQL Data Type: nvarchar(500)
+    * * Description: URL to a sample audio clip. Used by providers that support voice cloning from a reference recording.
+    */
+    get SampleAudioURL(): string | null {
+        return this.Get('SampleAudioURL');
+    }
+    set SampleAudioURL(value: string | null) {
+        this.Set('SampleAudioURL', value);
+    }
+
+    /**
+    * * Field Name: ProviderOverridesJSON
+    * * Display Name: Provider Overrides
+    * * SQL Data Type: nvarchar(MAX)
+    * * Description: JSON object keyed by provider with provider-specific knobs (e.g., { "elevenlabs": { "voiceId": "...", "stability": 0.5 }, "cartesia": { ... } }).
+    */
+    get ProviderOverridesJSON(): string | null {
+        return this.Get('ProviderOverridesJSON');
+    }
+    set ProviderOverridesJSON(value: string | null) {
+        this.Set('ProviderOverridesJSON', value);
+    }
+
+    /**
+    * * Field Name: __mj_CreatedAt
+    * * Display Name: Created At
+    * * SQL Data Type: datetimeoffset
+    * * Default Value: getutcdate()
+    */
+    get __mj_CreatedAt(): Date {
+        return this.Get('__mj_CreatedAt');
+    }
+
+    /**
+    * * Field Name: __mj_UpdatedAt
+    * * Display Name: Updated At
+    * * SQL Data Type: datetimeoffset
+    * * Default Value: getutcdate()
+    */
+    get __mj_UpdatedAt(): Date {
+        return this.Get('__mj_UpdatedAt');
     }
 }
 
@@ -58635,7 +59379,7 @@ export class MJConversationDetailEntity extends BaseEntity<MJConversationDetailE
 
     /**
     * * Field Name: SummaryOfEarlierConversation
-    * * Display Name: Summary Of Earlier Conversation
+    * * Display Name: Conversation Summary
     * * SQL Data Type: nvarchar(MAX)
     * * Description: This column optionally stores a summary of the entire conversation leading up to this particular conversation detail record. It is used in long-running conversations to optimize performance by summarizing earlier parts.
     */
@@ -58692,7 +59436,7 @@ export class MJConversationDetailEntity extends BaseEntity<MJConversationDetailE
 
     /**
     * * Field Name: CompletionTime
-    * * Display Name: Completion Time
+    * * Display Name: Completion Time (ms)
     * * SQL Data Type: bigint
     * * Description: Duration in milliseconds representing how long the AI response processing took to complete for this conversation detail.
     */
@@ -58719,7 +59463,7 @@ export class MJConversationDetailEntity extends BaseEntity<MJConversationDetailE
 
     /**
     * * Field Name: ParentID
-    * * Display Name: Parent
+    * * Display Name: Parent Message
     * * SQL Data Type: uniqueidentifier
     * * Related Entity/Foreign Key: MJ: Conversation Details (vwConversationDetails.ID)
     * * Description: Optional reference to parent message for threaded conversations. NULL for top-level messages.
@@ -58766,7 +59510,7 @@ export class MJConversationDetailEntity extends BaseEntity<MJConversationDetailE
 
     /**
     * * Field Name: SuggestedResponses
-    * * Display Name: Suggested Responses
+    * * Display Name: Suggested Responses (Legacy)
     * * 
     * * @deprecated This field is deprecated and will be removed in a future version. Using it will result in console warnings.SQL Data Type: nvarchar(MAX)
     * * Description: DEPRECATED: Use ResponseForm, ActionableCommands, and AutomaticCommands instead. Legacy field for simple text-based suggested responses. Replaced in v2.118 by more powerful structured forms and commands system. Retained for historical data only.
@@ -58846,8 +59590,22 @@ export class MJConversationDetailEntity extends BaseEntity<MJConversationDetailE
     }
 
     /**
+    * * Field Name: AIContentTypeID
+    * * Display Name: AI Content Type
+    * * SQL Data Type: uniqueidentifier
+    * * Related Entity/Foreign Key: MJ: AI Modalities (vwAIModalities.ID)
+    * * Description: Foreign key to AIModality. Content type of this conversation turn (text, audio, etc.) for replay and UX rendering. Nullable; existing rows remain NULL.
+    */
+    get AIContentTypeID(): string | null {
+        return this.Get('AIContentTypeID');
+    }
+    set AIContentTypeID(value: string | null) {
+        this.Set('AIContentTypeID', value);
+    }
+
+    /**
     * * Field Name: Conversation
-    * * Display Name: Conversation
+    * * Display Name: Conversation Label
     * * SQL Data Type: nvarchar(255)
     */
     get Conversation(): string | null {
@@ -58856,7 +59614,7 @@ export class MJConversationDetailEntity extends BaseEntity<MJConversationDetailE
 
     /**
     * * Field Name: User
-    * * Display Name: User
+    * * Display Name: User Label
     * * SQL Data Type: nvarchar(100)
     */
     get User(): string | null {
@@ -58865,7 +59623,7 @@ export class MJConversationDetailEntity extends BaseEntity<MJConversationDetailE
 
     /**
     * * Field Name: Artifact
-    * * Display Name: Artifact
+    * * Display Name: Artifact Label
     * * SQL Data Type: nvarchar(255)
     */
     get Artifact(): string | null {
@@ -58874,7 +59632,7 @@ export class MJConversationDetailEntity extends BaseEntity<MJConversationDetailE
 
     /**
     * * Field Name: ArtifactVersion
-    * * Display Name: Artifact Version
+    * * Display Name: Artifact Version Label
     * * SQL Data Type: nvarchar(255)
     */
     get ArtifactVersion(): string | null {
@@ -58883,7 +59641,7 @@ export class MJConversationDetailEntity extends BaseEntity<MJConversationDetailE
 
     /**
     * * Field Name: Parent
-    * * Display Name: Parent
+    * * Display Name: Parent Message Label
     * * SQL Data Type: nvarchar(MAX)
     */
     get Parent(): string | null {
@@ -58892,7 +59650,7 @@ export class MJConversationDetailEntity extends BaseEntity<MJConversationDetailE
 
     /**
     * * Field Name: Agent
-    * * Display Name: Agent
+    * * Display Name: Agent Label
     * * SQL Data Type: nvarchar(255)
     */
     get Agent(): string | null {
@@ -58901,7 +59659,7 @@ export class MJConversationDetailEntity extends BaseEntity<MJConversationDetailE
 
     /**
     * * Field Name: TestRun
-    * * Display Name: Test Run
+    * * Display Name: Test Run Label
     * * SQL Data Type: nvarchar(255)
     */
     get TestRun(): string | null {
@@ -58909,8 +59667,17 @@ export class MJConversationDetailEntity extends BaseEntity<MJConversationDetailE
     }
 
     /**
+    * * Field Name: AIContentType
+    * * Display Name: AI Content Type Label
+    * * SQL Data Type: nvarchar(50)
+    */
+    get AIContentType(): string | null {
+        return this.Get('AIContentType');
+    }
+
+    /**
     * * Field Name: RootParentID
-    * * Display Name: Root Parent
+    * * Display Name: Root Parent ID
     * * SQL Data Type: uniqueidentifier
     */
     get RootParentID(): string | null {

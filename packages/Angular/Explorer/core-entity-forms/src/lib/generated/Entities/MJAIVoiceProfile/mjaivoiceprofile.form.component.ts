@@ -18,7 +18,7 @@ export class MJAIVoiceProfileFormComponent extends BaseFormComponent {
         this.initSections([
             { sectionKey: 'profileIdentity', sectionName: 'Profile Identity', isExpanded: true },
             { sectionKey: 'voiceConfiguration', sectionName: 'Voice Configuration', isExpanded: true },
-            { sectionKey: 'providerSettings', sectionName: 'Provider Settings', isExpanded: false },
+            { sectionKey: 'providerSettings', sectionName: 'Provider Settings', isExpanded: true },
             { sectionKey: 'systemMetadata', sectionName: 'System Metadata', isExpanded: false },
             { sectionKey: 'mJAIAgentChannelConfigs', sectionName: 'AI Agent Channel Configs', isExpanded: false }
         ]);
