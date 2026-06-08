@@ -286,6 +286,17 @@ export interface LoopAgentTypePromptParams {
      */
     includePipelineDocs?: boolean;
 
+    /**
+     * Whether inter-turn streaming is enabled for this run. Set automatically
+     * by the agent layer to `!!params.onStreaming` — NOT a user/agent config
+     * value. When true, the system prompt declares the `streamingMessage`
+     * response field and instructs the model to emit a brief progress message
+     * each turn. When false/absent, the field is omitted from the schema and
+     * zero extra tokens are spent.
+     * @default false (set at runtime)
+     */
+    streamingEnabled?: boolean;
+
     // === Content Limiting ===
 
     /**
@@ -327,6 +338,9 @@ export const DEFAULT_LOOP_AGENT_PROMPT_PARAMS: Required<LoopAgentTypePromptParam
     scratchpadMaxTasks: 50,
     includeArtifactToolsDocs: true,
     includePipelineDocs: true,
+    // Streaming is wired at runtime from !!params.onStreaming, never via static
+    // config; default off so the schema omits streamingMessage unless requested.
+    streamingEnabled: false,
     maxSubAgentsInPrompt: -1,
     maxActionsInPrompt: -1
 };

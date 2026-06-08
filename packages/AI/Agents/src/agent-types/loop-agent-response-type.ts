@@ -19,6 +19,19 @@ export interface LoopAgentResponse<P = any> {
     message?: string;
 
     /**
+     * Optional brief progress message (<25 words) shown to the user while
+     * the agent works. Only present in the schema when streaming is enabled
+     * at runtime (i.e., the caller supplied an onStreaming callback).
+     *
+     * Populate every turn when this field is present in your schema. Use
+     * present-progressive tense: "Searching the knowledge base...",
+     * "Drafting your summary...".
+     *
+     * Independent of the final `message` field used on Chat turns.
+     */
+    streamingMessage?: string;
+
+    /**
      * Optional response form to collect structured user input.
      * When present, UI will render appropriate input controls.
      * @since 2.116.0

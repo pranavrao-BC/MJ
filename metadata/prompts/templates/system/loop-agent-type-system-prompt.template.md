@@ -10,6 +10,13 @@ interface LoopAgentResponse {
     taskComplete?: boolean;
     /** Plain text message (<100 words). Required for 'Chat' type, omit for others */
     message?: string;
+{% if __agentTypePromptParams.streamingEnabled %}
+    /** REQUIRED every turn. Brief 1-sentence (<25 words) description of
+     *  what you're doing, shown to the user in real time. Use present-
+     *  progressive tense. Examples: "Searching the knowledge base...",
+     *  "Looking up the customer record...", "Drafting your reply..." */
+    streamingMessage: string;
+{% endif %}
 {% if __agentTypePromptParams.includeResponseTypeDefinition.responseForms != false %}
     /** Optional response form to collect structured user input */
     responseForm?: AgentResponseForm;
@@ -120,6 +127,7 @@ Stop only when: goal complete OR unrecoverable failure.
 {% if __agentTypePromptParams.includeForEachDocs != false or __agentTypePromptParams.includeWhileDocs != false %}- **⚠️ ForEach/While results are TEMPORARY (ONE turn only)**: You MUST extract and store needed data in payload immediately after loop completion, or it's lost forever{% endif %}
 {% if subAgentCount == 0 %}- No sub-agents available{% endif %}
 {% if actionCount == 0 %}- No actions available{% endif %}
+{% if __agentTypePromptParams.streamingEnabled %}- `streamingMessage`: Set this on **every** turn. One short present-progressive sentence (<25 words) telling the user what you're doing right now. It streams to the user live and is separate from the final `message`. Keep it human-friendly — never echo JSON, reasoning, or tool internals.{% endif %}
 
 {% if __agentTypePromptParams.includeMessageExpansionDocs != false %}
 ## Message Expansion

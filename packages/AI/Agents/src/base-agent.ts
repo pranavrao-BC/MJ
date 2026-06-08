@@ -66,7 +66,6 @@ import { AgentRunner } from './AgentRunner';
 import { PayloadManager, PayloadManagerResult, PayloadChangeResultSummary } from './PayloadManager';
 import { ScratchpadManager } from './ScratchpadManager';
 import { ArtifactToolManager, ArtifactToolCall, StoredToolResult } from './ArtifactToolManager';
-import { MessageFieldExtractor } from './_internal/message-field-extractor';
 import {
     PipelineExecutor,
     PipelineToolRegistry,
@@ -2220,6 +2219,16 @@ export class BaseAgent {
         // Inject scratchpad template variables if scratchpad is enabled
         if (promptParams.data) {
             const agentTypePromptParams = promptParams.data.__agentTypePromptParams as Record<string, unknown> | undefined;
+
+            // Signal to the system prompt template whether inter-turn streaming is wired.
+            // Only when an onStreaming callback is supplied at runtime does the template
+            // declare the `streamingMessage` response field (gated by
+            // {% if __agentTypePromptParams.streamingEnabled %}), so no extra tokens are
+            // spent when nobody is listening.
+            if (agentTypePromptParams) {
+                agentTypePromptParams.streamingEnabled = !!params.onStreaming;
+            }
+
             const scratchpadEnabled = agentTypePromptParams?.includeScratchpadDocs !== false;
             if (scratchpadEnabled && this._scratchpadManager) {
                 promptParams.data['_SCRATCHPAD_NOTES'] = this._scratchpadManager.GetNotes() || '_(no notes yet)_';
@@ -6440,31 +6449,18 @@ The context is now within limits. Please retry your request with the recovered c
 
             const promptParams = await this.preparePromptParams(promptConfig, downstreamPayload, params);
             
-            // Pass cancellation token and streaming callbacks to prompt execution
+            // Pass cancellation token and streaming callbacks to prompt execution.
             promptParams.cancellationToken = params.cancellationToken;
-            // The LLM streams a raw `LoopAgentResponse` JSON envelope token-by-token
-            // (`{ "message": "...", "reasoning": "...", ... }`). Downstream consumers
-            // (chat UI, voice TTS) want the human-readable PROSE — never the JSON.
-            // We crack the `message` value out of the partial JSON AS IT STREAMS and
-            // re-emit it as a native `text` AgentStreamBlock, so nothing downstream
-            // ever parses JSON. This is the Loop agent's legacy-JSON → typed-blocks
-            // adapter, living here at the source of the stream.
-            const messageExtractor = new MessageFieldExtractor('message');
+            // The LLM streams a raw `LoopAgentResponse` JSON envelope token-by-token.
+            // We do NOT parse that JSON here — per-token prose extraction is the wrong
+            // granularity (it leaks reasoning/JSON noise). Instead, after the full
+            // response is parsed below, we emit a single clean `streamingMessage` per
+            // turn (see the emit just after executePrompt). Here we simply forward the
+            // raw chunk untouched, tagged with this prompt step's metadata, so any
+            // token-accumulating consumer still gets the stream.
             promptParams.onStreaming = params.onStreaming ? (chunk) => {
-                // The server resolver should get the agent run from the closure.
-                // Each prompt step emits a self-contained JSON envelope, and a single
-                // prompt step is one extractor lifetime — no stepEntityId boundary to
-                // reset across here (the extractor is scoped to this step). Crack the
-                // prose delta out of the raw JSON and forward it as a typed `text`
-                // block, with the chunk `content` ALSO set to the prose (never JSON).
-                const proseDelta = chunk.content ? messageExtractor.Feed(chunk.content) : '';
-                if (proseDelta.length === 0) {
-                    return; // No prose this chunk (JSON syntax, reasoning, etc.) — skip.
-                }
                 params.onStreaming!({
                     ...chunk,
-                    content: proseDelta,
-                    block: { Kind: 'text', Content: proseDelta },
                     stepType: 'prompt',
                     stepEntityId: stepEntity.ID
                 });
@@ -6552,6 +6548,29 @@ The context is now within limits. Please retry your request with the recovered c
                     step: 'Failed', // Cancelled is treated as failed
                     previousPayload: cancelledResult.payload,
                     newPayload: cancelledResult.payload // No changes, just return the same payload
+                }
+            }
+
+            // Inter-turn streaming: the model populates a `streamingMessage` field in its
+            // structured response each turn (only when streaming was enabled in the prompt).
+            // Forward it as a single clean text block over the existing onStreaming rail.
+            // A misbehaving callback must never break the agent loop, so this is guarded.
+            if (params.onStreaming) {
+                const parsedResult = promptResult.result as { streamingMessage?: unknown } | undefined;
+                const streamingMessage = parsedResult?.streamingMessage;
+                if (typeof streamingMessage === 'string' && streamingMessage.length > 0) {
+                    try {
+                        params.onStreaming({
+                            content: streamingMessage,
+                            isComplete: true,
+                            stepType: 'prompt',
+                            stepEntityId: stepEntity.ID,
+                            block: { Kind: 'text', Content: streamingMessage }
+                        });
+                    } catch (err) {
+                        // A misbehaving streaming callback must never break the loop.
+                        LogError(err as Error);
+                    }
                 }
             }
 
