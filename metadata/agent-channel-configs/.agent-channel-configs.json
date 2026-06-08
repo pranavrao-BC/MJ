@@ -47,7 +47,7 @@
   },
   {
     "fields": {
-      "AIAgentID": "@lookup:MJ: AI Agents.Name=Sage Voice",
+      "AIAgentID": "@lookup:MJ: AI Agents.Name=Sage",
       "AIAgentChannelID": "@lookup:MJ: AI Agent Channels.Name=voice-realtime",
       "Sequence": 2,
       "Status": "Active",

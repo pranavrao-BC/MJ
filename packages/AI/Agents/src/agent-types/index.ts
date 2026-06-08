@@ -13,4 +13,3 @@
 export * from './base-agent-type';
 export * from './loop-agent-type';
 export * from './flow-agent-type';
-export * from './realtime-agent-type';

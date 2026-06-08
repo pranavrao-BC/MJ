@@ -134,25 +134,5 @@
       "lastModified": "2025-12-30T23:07:33.547Z",
       "checksum": "a76eb179f00dcf192c1a97ce2de365403f7e47a77b90a1ef7c475ae83f27d8b2"
     }
-  },
-  {
-    "fields": {
-      "Name": "Realtime",
-      "Description": "Realtime speech-to-speech (S2S) agent type. The model holds a live bidirectional voice session as the brain (its own VAD/endpointing); its tool calls (delegate_to_agent, draw_on_whiteboard) route to native MJ agent runs. Driven by RealtimeAgentType.",
-      "SystemPromptID": null,
-      "IsActive": true,
-      "AgentPromptPlaceholder": null,
-      "DriverClass": "RealtimeAgentType",
-      "UIFormSectionKey": null,
-      "UIFormKey": null,
-      "UIFormSectionExpandedByDefault": false
-    },
-    "primaryKey": {
-      "ID": "08F7A927-71B1-4329-AA66-8E46C5685B10"
-    },
-    "sync": {
-      "lastModified": "2026-06-07T23:08:47.755Z",
-      "checksum": "76c77e0343030de36b8d3cf571e1c04805058b7d95f1545ffcbc10cfa0c7446f"
-    }
   }
 ]

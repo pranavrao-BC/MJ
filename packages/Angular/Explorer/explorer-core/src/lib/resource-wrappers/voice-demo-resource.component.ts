@@ -32,7 +32,7 @@ LoadVoiceWidget();
         <div class="voice-demo-resource">
             <mj-voice-widget
                 [AgentID]="AgentID"
-                [ChannelName]="'voice-realtime'"
+                [ChannelName]="'voice-cascaded'"
                 [ShowWhiteboardChannel]="true"
             ></mj-voice-widget>
         </div>
