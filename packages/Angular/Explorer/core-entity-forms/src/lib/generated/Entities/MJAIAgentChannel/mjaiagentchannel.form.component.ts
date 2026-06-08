@@ -18,6 +18,7 @@ export class MJAIAgentChannelFormComponent extends BaseFormComponent {
         this.initSections([
             { sectionKey: 'channelDefinition', sectionName: 'Channel Definition', isExpanded: true },
             { sectionKey: 'technicalConfiguration', sectionName: 'Technical Configuration', isExpanded: true },
+            { sectionKey: 'details', sectionName: 'Details', isExpanded: true },
             { sectionKey: 'systemMetadata', sectionName: 'System Metadata', isExpanded: false },
             { sectionKey: 'mJAIAgentChannelConfigs', sectionName: 'AI Agent Channel Configs', isExpanded: false },
             { sectionKey: 'mJAIAgentRuns', sectionName: 'AI Agent Runs', isExpanded: false }

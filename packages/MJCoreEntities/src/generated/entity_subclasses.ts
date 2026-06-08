@@ -1197,6 +1197,21 @@ export const MJAIAgentChannelSchema = z.object({
         * * Display Name: Updated At
         * * SQL Data Type: datetimeoffset
         * * Default Value: getutcdate()`),
+    ServerPluginClass: z.string().nullable().describe(`
+        * * Field Name: ServerPluginClass
+        * * Display Name: Server Plugin Class
+        * * SQL Data Type: nvarchar(250)
+        * * Description: ClassFactory registration key for the server-side channel plugin implementing IAgentChannelServer (manages the WebSocket/WebRTC connection and streams data both ways).`),
+    ClientPluginClass: z.string().nullable().describe(`
+        * * Field Name: ClientPluginClass
+        * * Display Name: Client Plugin Class
+        * * SQL Data Type: nvarchar(250)
+        * * Description: ClassFactory registration key for the client-side channel plugin implementing IAgentChannelClient (establishes the socket, captures user input, renders agent events).`),
+    ConfigSchema: z.string().nullable().describe(`
+        * * Field Name: ConfigSchema
+        * * Display Name: Config Schema
+        * * SQL Data Type: nvarchar(MAX)
+        * * Description: Optional JSON Schema used to validate the parameters supplied when activating this channel on a session.`),
 });
 
 export type MJAIAgentChannelEntityType = z.infer<typeof MJAIAgentChannelSchema>;
@@ -1654,11 +1669,11 @@ export const MJAIAgentExampleSchema = z.object({
     SourceConversationDetail: z.string().nullable().describe(`
         * * Field Name: SourceConversationDetail
         * * Display Name: Source Conversation Detail
-        * * SQL Data Type: nvarchar(MAX)`),
+        * * SQL Data Type: nvarchar(20)`),
     SourceAIAgentRun: z.string().nullable().describe(`
         * * Field Name: SourceAIAgentRun
         * * Display Name: Source AI Agent Run
-        * * SQL Data Type: nvarchar(255)`),
+        * * SQL Data Type: uniqueidentifier`),
     EmbeddingModel: z.string().nullable().describe(`
         * * Field Name: EmbeddingModel
         * * Display Name: Embedding Model
@@ -2095,11 +2110,11 @@ export const MJAIAgentNoteSchema = z.object({
     SourceConversationDetail: z.string().nullable().describe(`
         * * Field Name: SourceConversationDetail
         * * Display Name: Source Conversation Detail
-        * * SQL Data Type: nvarchar(MAX)`),
+        * * SQL Data Type: nvarchar(20)`),
     SourceAIAgentRun: z.string().nullable().describe(`
         * * Field Name: SourceAIAgentRun
         * * Display Name: Source AI Agent Run
-        * * SQL Data Type: nvarchar(255)`),
+        * * SQL Data Type: uniqueidentifier`),
     Company: z.string().nullable().describe(`
         * * Field Name: Company
         * * Display Name: Company
@@ -2596,7 +2611,7 @@ export const MJAIAgentRequestSchema = z.object({
     OriginatingAgentRun: z.string().nullable().describe(`
         * * Field Name: OriginatingAgentRun
         * * Display Name: Originating Agent Run Name
-        * * SQL Data Type: nvarchar(255)`),
+        * * SQL Data Type: uniqueidentifier`),
     OriginatingAgentRunStep: z.string().nullable().describe(`
         * * Field Name: OriginatingAgentRunStep
         * * Display Name: Originating Agent Run Step Name
@@ -2604,7 +2619,7 @@ export const MJAIAgentRequestSchema = z.object({
     ResumingAgentRun: z.string().nullable().describe(`
         * * Field Name: ResumingAgentRun
         * * Display Name: Resuming Agent Run Name
-        * * SQL Data Type: nvarchar(255)`),
+        * * SQL Data Type: uniqueidentifier`),
 });
 
 export type MJAIAgentRequestEntityType = z.infer<typeof MJAIAgentRequestSchema>;
@@ -2698,10 +2713,10 @@ export const MJAIAgentRunMediaSchema = z.object({
         * * Display Name: Description
         * * SQL Data Type: nvarchar(MAX)
         * * Description: Agent notes describing what this media represents. Used for internal tracking and can be displayed in UI.`),
-    AgentRun: z.string().nullable().describe(`
+    AgentRun: z.string().describe(`
         * * Field Name: AgentRun
         * * Display Name: Agent Run
-        * * SQL Data Type: nvarchar(255)`),
+        * * SQL Data Type: uniqueidentifier`),
     SourcePromptRunMedia: z.string().nullable().describe(`
         * * Field Name: SourcePromptRunMedia
         * * Display Name: Source Prompt Run Media
@@ -2868,10 +2883,10 @@ detailed information about what validation rules failed.`),
         * * Display Name: Comments
         * * SQL Data Type: nvarchar(MAX)
         * * Description: Human-readable notes and comments about this agent run step`),
-    AgentRun: z.string().nullable().describe(`
+    AgentRun: z.string().describe(`
         * * Field Name: AgentRun
         * * Display Name: Agent Run
-        * * SQL Data Type: nvarchar(255)`),
+        * * SQL Data Type: uniqueidentifier`),
     Parent: z.string().nullable().describe(`
         * * Field Name: Parent
         * * Display Name: Parent Step
@@ -3182,6 +3197,11 @@ each time the agent processes a prompt step.`),
         * * SQL Data Type: uniqueidentifier
         * * Related Entity/Foreign Key: MJ: AI Agent Channels (vwAIAgentChannels.ID)
         * * Description: Foreign key to AIAgentChannel. The channel this run executed over. Nullable for backward compatibility with pre-channel runs.`),
+    SessionID: z.string().nullable().describe(`
+        * * Field Name: SessionID
+        * * Display Name: Session ID
+        * * SQL Data Type: uniqueidentifier
+        * * Related Entity/Foreign Key: MJ: AI Agent Sessions (vwAIAgentSessions.ID)`),
     Agent: z.string().nullable().describe(`
         * * Field Name: Agent
         * * Display Name: Agent Details
@@ -3189,7 +3209,7 @@ each time the agent processes a prompt step.`),
     ParentRun: z.string().nullable().describe(`
         * * Field Name: ParentRun
         * * Display Name: Parent Run Info
-        * * SQL Data Type: nvarchar(255)`),
+        * * SQL Data Type: uniqueidentifier`),
     Conversation: z.string().nullable().describe(`
         * * Field Name: Conversation
         * * Display Name: Conversation Info
@@ -3201,11 +3221,11 @@ each time the agent processes a prompt step.`),
     ConversationDetail: z.string().nullable().describe(`
         * * Field Name: ConversationDetail
         * * Display Name: Conversation Detail Info
-        * * SQL Data Type: nvarchar(MAX)`),
+        * * SQL Data Type: nvarchar(20)`),
     LastRun: z.string().nullable().describe(`
         * * Field Name: LastRun
         * * Display Name: Last Run Info
-        * * SQL Data Type: nvarchar(255)`),
+        * * SQL Data Type: uniqueidentifier`),
     Configuration: z.string().nullable().describe(`
         * * Field Name: Configuration
         * * Display Name: Configuration Info
@@ -3354,6 +3374,83 @@ export const MJAIAgentSearchScopeSchema = z.object({
 });
 
 export type MJAIAgentSearchScopeEntityType = z.infer<typeof MJAIAgentSearchScopeSchema>;
+
+/**
+ * zod schema definition for the entity MJ: AI Agent Sessions
+ */
+export const MJAIAgentSessionSchema = z.object({
+    ID: z.string().describe(`
+        * * Field Name: ID
+        * * Display Name: ID
+        * * SQL Data Type: uniqueidentifier
+        * * Default Value: newsequentialid()`),
+    AgentID: z.string().describe(`
+        * * Field Name: AgentID
+        * * Display Name: Agent ID
+        * * SQL Data Type: uniqueidentifier
+        * * Related Entity/Foreign Key: MJ: AI Agents (vwAIAgents.ID)`),
+    UserID: z.string().describe(`
+        * * Field Name: UserID
+        * * Display Name: User ID
+        * * SQL Data Type: uniqueidentifier
+        * * Related Entity/Foreign Key: MJ: Users (vwUsers.ID)`),
+    Status: z.union([z.literal('Active'), z.literal('Closed'), z.literal('Idle')]).describe(`
+        * * Field Name: Status
+        * * Display Name: Status
+        * * SQL Data Type: nvarchar(20)
+        * * Default Value: Active
+    * * Value List Type: List
+    * * Possible Values 
+    *   * Active
+    *   * Closed
+    *   * Idle
+        * * Description: Lifecycle status of the session: Active (live connection), Idle (no recent activity), Closed (socket terminated). The conversation and its details remain after a session closes.`),
+    ConversationID: z.string().nullable().describe(`
+        * * Field Name: ConversationID
+        * * Display Name: Conversation ID
+        * * SQL Data Type: uniqueidentifier
+        * * Related Entity/Foreign Key: MJ: Conversations (vwConversations.ID)`),
+    Config_: z.string().nullable().describe(`
+        * * Field Name: Config
+        * * Display Name: Config
+        * * SQL Data Type: nvarchar(MAX)
+        * * Description: Session-specific state and variables as a JSON block (e.g. negotiated codecs, per-session settings).`),
+    ActiveChannels: z.string().nullable().describe(`
+        * * Field Name: ActiveChannels
+        * * Display Name: Active Channels
+        * * SQL Data Type: nvarchar(MAX)
+        * * Description: JSON array of the channels currently active on this session, e.g. [{ channelId, socketUrl, status, config }]. Tracked dynamically rather than in a normalized sub-table.`),
+    LastActiveAt: z.date().describe(`
+        * * Field Name: LastActiveAt
+        * * Display Name: Last Active At
+        * * SQL Data Type: datetimeoffset
+        * * Default Value: sysdatetimeoffset()
+        * * Description: Timestamp (with offset) of the last activity on the session, used for idle detection and expiry.`),
+    __mj_CreatedAt: z.date().describe(`
+        * * Field Name: __mj_CreatedAt
+        * * Display Name: Created At
+        * * SQL Data Type: datetimeoffset
+        * * Default Value: getutcdate()`),
+    __mj_UpdatedAt: z.date().describe(`
+        * * Field Name: __mj_UpdatedAt
+        * * Display Name: Updated At
+        * * SQL Data Type: datetimeoffset
+        * * Default Value: getutcdate()`),
+    Agent: z.string().nullable().describe(`
+        * * Field Name: Agent
+        * * Display Name: Agent
+        * * SQL Data Type: nvarchar(255)`),
+    User: z.string().describe(`
+        * * Field Name: User
+        * * Display Name: User
+        * * SQL Data Type: nvarchar(100)`),
+    Conversation: z.string().nullable().describe(`
+        * * Field Name: Conversation
+        * * Display Name: Conversation
+        * * SQL Data Type: nvarchar(255)`),
+});
+
+export type MJAIAgentSessionEntityType = z.infer<typeof MJAIAgentSessionSchema>;
 
 /**
  * zod schema definition for the entity MJ: AI Agent Step Paths
@@ -6055,7 +6152,7 @@ export const MJAIPromptRunSchema = z.object({
     AgentRun: z.string().nullable().describe(`
         * * Field Name: AgentRun
         * * Display Name: Agent Run
-        * * SQL Data Type: nvarchar(255)`),
+        * * SQL Data Type: uniqueidentifier`),
     OriginalModel: z.string().nullable().describe(`
         * * Field Name: OriginalModel
         * * Display Name: Original Model
@@ -11739,7 +11836,7 @@ export const MJConversationDetailArtifactSchema = z.object({
     ConversationDetail: z.string().describe(`
         * * Field Name: ConversationDetail
         * * Display Name: Conversation Detail Summary
-        * * SQL Data Type: nvarchar(MAX)`),
+        * * SQL Data Type: nvarchar(20)`),
     ArtifactVersion: z.string().nullable().describe(`
         * * Field Name: ArtifactVersion
         * * Display Name: Artifact Version Summary
@@ -11844,7 +11941,7 @@ export const MJConversationDetailAttachmentSchema = z.object({
     ConversationDetail: z.string().describe(`
         * * Field Name: ConversationDetail
         * * Display Name: Conversation Detail Record
-        * * SQL Data Type: nvarchar(MAX)`),
+        * * SQL Data Type: nvarchar(20)`),
     Modality: z.string().describe(`
         * * Field Name: Modality
         * * Display Name: Modality Record
@@ -11905,7 +12002,7 @@ export const MJConversationDetailRatingSchema = z.object({
     ConversationDetail: z.string().describe(`
         * * Field Name: ConversationDetail
         * * Display Name: Conversation Detail
-        * * SQL Data Type: nvarchar(MAX)`),
+        * * SQL Data Type: nvarchar(20)`),
     User: z.string().describe(`
         * * Field Name: User
         * * Display Name: User
@@ -12080,6 +12177,11 @@ export const MJConversationDetailSchema = z.object({
         * * SQL Data Type: uniqueidentifier
         * * Related Entity/Foreign Key: MJ: AI Modalities (vwAIModalities.ID)
         * * Description: Foreign key to AIModality. Content type of this conversation turn (text, audio, etc.) for replay and UX rendering. Nullable; existing rows remain NULL.`),
+    SessionID: z.string().nullable().describe(`
+        * * Field Name: SessionID
+        * * Display Name: Session ID
+        * * SQL Data Type: uniqueidentifier
+        * * Related Entity/Foreign Key: MJ: AI Agent Sessions (vwAIAgentSessions.ID)`),
     Conversation: z.string().nullable().describe(`
         * * Field Name: Conversation
         * * Display Name: Conversation Label
@@ -12099,7 +12201,7 @@ export const MJConversationDetailSchema = z.object({
     Parent: z.string().nullable().describe(`
         * * Field Name: Parent
         * * Display Name: Parent Message Label
-        * * SQL Data Type: nvarchar(MAX)`),
+        * * SQL Data Type: nvarchar(20)`),
     Agent: z.string().nullable().describe(`
         * * Field Name: Agent
         * * Display Name: Agent Label
@@ -21984,7 +22086,7 @@ export const MJReportSchema = z.object({
     ConversationDetail: z.string().nullable().describe(`
         * * Field Name: ConversationDetail
         * * Display Name: Conversation Detail Name
-        * * SQL Data Type: nvarchar(MAX)`),
+        * * SQL Data Type: nvarchar(20)`),
     DataContext: z.string().nullable().describe(`
         * * Field Name: DataContext
         * * Display Name: Data Context Name
@@ -24432,7 +24534,7 @@ export const MJTaskSchema = z.object({
     ConversationDetail: z.string().nullable().describe(`
         * * Field Name: ConversationDetail
         * * Display Name: Conversation Detail Name
-        * * SQL Data Type: nvarchar(MAX)`),
+        * * SQL Data Type: nvarchar(20)`),
     User: z.string().nullable().describe(`
         * * Field Name: User
         * * Display Name: User Name
@@ -30767,6 +30869,45 @@ export class MJAIAgentChannelEntity extends BaseEntity<MJAIAgentChannelEntityTyp
     get __mj_UpdatedAt(): Date {
         return this.Get('__mj_UpdatedAt');
     }
+
+    /**
+    * * Field Name: ServerPluginClass
+    * * Display Name: Server Plugin Class
+    * * SQL Data Type: nvarchar(250)
+    * * Description: ClassFactory registration key for the server-side channel plugin implementing IAgentChannelServer (manages the WebSocket/WebRTC connection and streams data both ways).
+    */
+    get ServerPluginClass(): string | null {
+        return this.Get('ServerPluginClass');
+    }
+    set ServerPluginClass(value: string | null) {
+        this.Set('ServerPluginClass', value);
+    }
+
+    /**
+    * * Field Name: ClientPluginClass
+    * * Display Name: Client Plugin Class
+    * * SQL Data Type: nvarchar(250)
+    * * Description: ClassFactory registration key for the client-side channel plugin implementing IAgentChannelClient (establishes the socket, captures user input, renders agent events).
+    */
+    get ClientPluginClass(): string | null {
+        return this.Get('ClientPluginClass');
+    }
+    set ClientPluginClass(value: string | null) {
+        this.Set('ClientPluginClass', value);
+    }
+
+    /**
+    * * Field Name: ConfigSchema
+    * * Display Name: Config Schema
+    * * SQL Data Type: nvarchar(MAX)
+    * * Description: Optional JSON Schema used to validate the parameters supplied when activating this channel on a session.
+    */
+    get ConfigSchema(): string | null {
+        return this.Get('ConfigSchema');
+    }
+    set ConfigSchema(value: string | null) {
+        this.Set('ConfigSchema', value);
+    }
 }
 
 
@@ -31928,7 +32069,7 @@ export class MJAIAgentExampleEntity extends BaseEntity<MJAIAgentExampleEntityTyp
     /**
     * * Field Name: SourceConversationDetail
     * * Display Name: Source Conversation Detail
-    * * SQL Data Type: nvarchar(MAX)
+    * * SQL Data Type: nvarchar(20)
     */
     get SourceConversationDetail(): string | null {
         return this.Get('SourceConversationDetail');
@@ -31937,7 +32078,7 @@ export class MJAIAgentExampleEntity extends BaseEntity<MJAIAgentExampleEntityTyp
     /**
     * * Field Name: SourceAIAgentRun
     * * Display Name: Source AI Agent Run
-    * * SQL Data Type: nvarchar(255)
+    * * SQL Data Type: uniqueidentifier
     */
     get SourceAIAgentRun(): string | null {
         return this.Get('SourceAIAgentRun');
@@ -32997,7 +33138,7 @@ export class MJAIAgentNoteEntity extends BaseEntity<MJAIAgentNoteEntityType> {
     /**
     * * Field Name: SourceConversationDetail
     * * Display Name: Source Conversation Detail
-    * * SQL Data Type: nvarchar(MAX)
+    * * SQL Data Type: nvarchar(20)
     */
     get SourceConversationDetail(): string | null {
         return this.Get('SourceConversationDetail');
@@ -33006,7 +33147,7 @@ export class MJAIAgentNoteEntity extends BaseEntity<MJAIAgentNoteEntityType> {
     /**
     * * Field Name: SourceAIAgentRun
     * * Display Name: Source AI Agent Run
-    * * SQL Data Type: nvarchar(255)
+    * * SQL Data Type: uniqueidentifier
     */
     get SourceAIAgentRun(): string | null {
         return this.Get('SourceAIAgentRun');
@@ -34316,7 +34457,7 @@ export class MJAIAgentRequestEntity extends BaseEntity<MJAIAgentRequestEntityTyp
     /**
     * * Field Name: OriginatingAgentRun
     * * Display Name: Originating Agent Run Name
-    * * SQL Data Type: nvarchar(255)
+    * * SQL Data Type: uniqueidentifier
     */
     get OriginatingAgentRun(): string | null {
         return this.Get('OriginatingAgentRun');
@@ -34334,7 +34475,7 @@ export class MJAIAgentRequestEntity extends BaseEntity<MJAIAgentRequestEntityTyp
     /**
     * * Field Name: ResumingAgentRun
     * * Display Name: Resuming Agent Run Name
-    * * SQL Data Type: nvarchar(255)
+    * * SQL Data Type: uniqueidentifier
     */
     get ResumingAgentRun(): string | null {
         return this.Get('ResumingAgentRun');
@@ -34605,9 +34746,9 @@ export class MJAIAgentRunMediaEntity extends BaseEntity<MJAIAgentRunMediaEntityT
     /**
     * * Field Name: AgentRun
     * * Display Name: Agent Run
-    * * SQL Data Type: nvarchar(255)
+    * * SQL Data Type: uniqueidentifier
     */
-    get AgentRun(): string | null {
+    get AgentRun(): string {
         return this.Get('AgentRun');
     }
 
@@ -35073,9 +35214,9 @@ detailed information about what validation rules failed.
     /**
     * * Field Name: AgentRun
     * * Display Name: Agent Run
-    * * SQL Data Type: nvarchar(255)
+    * * SQL Data Type: uniqueidentifier
     */
-    get AgentRun(): string | null {
+    get AgentRun(): string {
         return this.Get('AgentRun');
     }
 
@@ -35905,6 +36046,19 @@ each time the agent processes a prompt step.
     }
 
     /**
+    * * Field Name: SessionID
+    * * Display Name: Session ID
+    * * SQL Data Type: uniqueidentifier
+    * * Related Entity/Foreign Key: MJ: AI Agent Sessions (vwAIAgentSessions.ID)
+    */
+    get SessionID(): string | null {
+        return this.Get('SessionID');
+    }
+    set SessionID(value: string | null) {
+        this.Set('SessionID', value);
+    }
+
+    /**
     * * Field Name: Agent
     * * Display Name: Agent Details
     * * SQL Data Type: nvarchar(255)
@@ -35916,7 +36070,7 @@ each time the agent processes a prompt step.
     /**
     * * Field Name: ParentRun
     * * Display Name: Parent Run Info
-    * * SQL Data Type: nvarchar(255)
+    * * SQL Data Type: uniqueidentifier
     */
     get ParentRun(): string | null {
         return this.Get('ParentRun');
@@ -35943,7 +36097,7 @@ each time the agent processes a prompt step.
     /**
     * * Field Name: ConversationDetail
     * * Display Name: Conversation Detail Info
-    * * SQL Data Type: nvarchar(MAX)
+    * * SQL Data Type: nvarchar(20)
     */
     get ConversationDetail(): string | null {
         return this.Get('ConversationDetail');
@@ -35952,7 +36106,7 @@ each time the agent processes a prompt step.
     /**
     * * Field Name: LastRun
     * * Display Name: Last Run Info
-    * * SQL Data Type: nvarchar(255)
+    * * SQL Data Type: uniqueidentifier
     */
     get LastRun(): string | null {
         return this.Get('LastRun');
@@ -36299,6 +36453,196 @@ export class MJAIAgentSearchScopeEntity extends BaseEntity<MJAIAgentSearchScopeE
     */
     get QueryTemplate(): string | null {
         return this.Get('QueryTemplate');
+    }
+}
+
+
+/**
+ * MJ: AI Agent Sessions - strongly typed entity sub-class
+ * * Schema: __mj
+ * * Base Table: AIAgentSession
+ * * Base View: vwAIAgentSessions
+ * * Primary Key: ID
+ * @extends {BaseEntity}
+ * @class
+ * @public
+ */
+@RegisterClass(BaseEntity, 'MJ: AI Agent Sessions')
+export class MJAIAgentSessionEntity extends BaseEntity<MJAIAgentSessionEntityType> {
+    /**
+    * Loads the MJ: AI Agent Sessions record from the database
+    * @param ID: string - primary key value to load the MJ: AI Agent Sessions record.
+    * @param EntityRelationshipsToLoad - (optional) the relationships to load
+    * @returns {Promise<boolean>} - true if successful, false otherwise
+    * @public
+    * @async
+    * @memberof MJAIAgentSessionEntity
+    * @method
+    * @override
+    */
+    public async Load(ID: string, EntityRelationshipsToLoad?: string[]) : Promise<boolean> {
+        const compositeKey: CompositeKey = new CompositeKey();
+        compositeKey.KeyValuePairs.push({ FieldName: 'ID', Value: ID });
+        return await super.InnerLoad(compositeKey, EntityRelationshipsToLoad);
+    }
+
+    /**
+    * * Field Name: ID
+    * * Display Name: ID
+    * * SQL Data Type: uniqueidentifier
+    * * Default Value: newsequentialid()
+    */
+    get ID(): string {
+        return this.Get('ID');
+    }
+    set ID(value: string) {
+        this.Set('ID', value);
+    }
+
+    /**
+    * * Field Name: AgentID
+    * * Display Name: Agent ID
+    * * SQL Data Type: uniqueidentifier
+    * * Related Entity/Foreign Key: MJ: AI Agents (vwAIAgents.ID)
+    */
+    get AgentID(): string {
+        return this.Get('AgentID');
+    }
+    set AgentID(value: string) {
+        this.Set('AgentID', value);
+    }
+
+    /**
+    * * Field Name: UserID
+    * * Display Name: User ID
+    * * SQL Data Type: uniqueidentifier
+    * * Related Entity/Foreign Key: MJ: Users (vwUsers.ID)
+    */
+    get UserID(): string {
+        return this.Get('UserID');
+    }
+    set UserID(value: string) {
+        this.Set('UserID', value);
+    }
+
+    /**
+    * * Field Name: Status
+    * * Display Name: Status
+    * * SQL Data Type: nvarchar(20)
+    * * Default Value: Active
+    * * Value List Type: List
+    * * Possible Values 
+    *   * Active
+    *   * Closed
+    *   * Idle
+    * * Description: Lifecycle status of the session: Active (live connection), Idle (no recent activity), Closed (socket terminated). The conversation and its details remain after a session closes.
+    */
+    get Status(): 'Active' | 'Closed' | 'Idle' {
+        return this.Get('Status');
+    }
+    set Status(value: 'Active' | 'Closed' | 'Idle') {
+        this.Set('Status', value);
+    }
+
+    /**
+    * * Field Name: ConversationID
+    * * Display Name: Conversation ID
+    * * SQL Data Type: uniqueidentifier
+    * * Related Entity/Foreign Key: MJ: Conversations (vwConversations.ID)
+    */
+    get ConversationID(): string | null {
+        return this.Get('ConversationID');
+    }
+    set ConversationID(value: string | null) {
+        this.Set('ConversationID', value);
+    }
+
+    /**
+    * * Field Name: Config
+    * * Display Name: Config
+    * * SQL Data Type: nvarchar(MAX)
+    * * Description: Session-specific state and variables as a JSON block (e.g. negotiated codecs, per-session settings).
+    * * NOTE: Property renamed to `Config_` to avoid conflict with BaseEntity.Config
+    */
+    get Config_(): string | null {
+        return this.Get('Config');
+    }
+    set Config_(value: string | null) {
+        this.Set('Config', value);
+    }
+
+    /**
+    * * Field Name: ActiveChannels
+    * * Display Name: Active Channels
+    * * SQL Data Type: nvarchar(MAX)
+    * * Description: JSON array of the channels currently active on this session, e.g. [{ channelId, socketUrl, status, config }]. Tracked dynamically rather than in a normalized sub-table.
+    */
+    get ActiveChannels(): string | null {
+        return this.Get('ActiveChannels');
+    }
+    set ActiveChannels(value: string | null) {
+        this.Set('ActiveChannels', value);
+    }
+
+    /**
+    * * Field Name: LastActiveAt
+    * * Display Name: Last Active At
+    * * SQL Data Type: datetimeoffset
+    * * Default Value: sysdatetimeoffset()
+    * * Description: Timestamp (with offset) of the last activity on the session, used for idle detection and expiry.
+    */
+    get LastActiveAt(): Date {
+        return this.Get('LastActiveAt');
+    }
+    set LastActiveAt(value: Date) {
+        this.Set('LastActiveAt', value);
+    }
+
+    /**
+    * * Field Name: __mj_CreatedAt
+    * * Display Name: Created At
+    * * SQL Data Type: datetimeoffset
+    * * Default Value: getutcdate()
+    */
+    get __mj_CreatedAt(): Date {
+        return this.Get('__mj_CreatedAt');
+    }
+
+    /**
+    * * Field Name: __mj_UpdatedAt
+    * * Display Name: Updated At
+    * * SQL Data Type: datetimeoffset
+    * * Default Value: getutcdate()
+    */
+    get __mj_UpdatedAt(): Date {
+        return this.Get('__mj_UpdatedAt');
+    }
+
+    /**
+    * * Field Name: Agent
+    * * Display Name: Agent
+    * * SQL Data Type: nvarchar(255)
+    */
+    get Agent(): string | null {
+        return this.Get('Agent');
+    }
+
+    /**
+    * * Field Name: User
+    * * Display Name: User
+    * * SQL Data Type: nvarchar(100)
+    */
+    get User(): string {
+        return this.Get('User');
+    }
+
+    /**
+    * * Field Name: Conversation
+    * * Display Name: Conversation
+    * * SQL Data Type: nvarchar(255)
+    */
+    get Conversation(): string | null {
+        return this.Get('Conversation');
     }
 }
 
@@ -43858,7 +44202,7 @@ export class MJAIPromptRunEntity extends BaseEntity<MJAIPromptRunEntityType> {
     /**
     * * Field Name: AgentRun
     * * Display Name: Agent Run
-    * * SQL Data Type: nvarchar(255)
+    * * SQL Data Type: uniqueidentifier
     */
     get AgentRun(): string | null {
         return this.Get('AgentRun');
@@ -58626,7 +58970,7 @@ export class MJConversationDetailArtifactEntity extends BaseEntity<MJConversatio
     /**
     * * Field Name: ConversationDetail
     * * Display Name: Conversation Detail Summary
-    * * SQL Data Type: nvarchar(MAX)
+    * * SQL Data Type: nvarchar(20)
     */
     get ConversationDetail(): string {
         return this.Get('ConversationDetail');
@@ -58929,7 +59273,7 @@ export class MJConversationDetailAttachmentEntity extends BaseEntity<MJConversat
     /**
     * * Field Name: ConversationDetail
     * * Display Name: Conversation Detail Record
-    * * SQL Data Type: nvarchar(MAX)
+    * * SQL Data Type: nvarchar(20)
     */
     get ConversationDetail(): string {
         return this.Get('ConversationDetail');
@@ -59111,7 +59455,7 @@ export class MJConversationDetailRatingEntity extends BaseEntity<MJConversationD
     /**
     * * Field Name: ConversationDetail
     * * Display Name: Conversation Detail
-    * * SQL Data Type: nvarchar(MAX)
+    * * SQL Data Type: nvarchar(20)
     */
     get ConversationDetail(): string {
         return this.Get('ConversationDetail');
@@ -59604,6 +59948,19 @@ export class MJConversationDetailEntity extends BaseEntity<MJConversationDetailE
     }
 
     /**
+    * * Field Name: SessionID
+    * * Display Name: Session ID
+    * * SQL Data Type: uniqueidentifier
+    * * Related Entity/Foreign Key: MJ: AI Agent Sessions (vwAIAgentSessions.ID)
+    */
+    get SessionID(): string | null {
+        return this.Get('SessionID');
+    }
+    set SessionID(value: string | null) {
+        this.Set('SessionID', value);
+    }
+
+    /**
     * * Field Name: Conversation
     * * Display Name: Conversation Label
     * * SQL Data Type: nvarchar(255)
@@ -59642,7 +59999,7 @@ export class MJConversationDetailEntity extends BaseEntity<MJConversationDetailE
     /**
     * * Field Name: Parent
     * * Display Name: Parent Message Label
-    * * SQL Data Type: nvarchar(MAX)
+    * * SQL Data Type: nvarchar(20)
     */
     get Parent(): string | null {
         return this.Get('Parent');
@@ -84928,7 +85285,7 @@ export class MJReportEntity extends BaseEntity<MJReportEntityType> {
     /**
     * * Field Name: ConversationDetail
     * * Display Name: Conversation Detail Name
-    * * SQL Data Type: nvarchar(MAX)
+    * * SQL Data Type: nvarchar(20)
     */
     get ConversationDetail(): string | null {
         return this.Get('ConversationDetail');
@@ -91398,7 +91755,7 @@ export class MJTaskEntity extends BaseEntity<MJTaskEntityType> {
     /**
     * * Field Name: ConversationDetail
     * * Display Name: Conversation Detail Name
-    * * SQL Data Type: nvarchar(MAX)
+    * * SQL Data Type: nvarchar(20)
     */
     get ConversationDetail(): string | null {
         return this.Get('ConversationDetail');
